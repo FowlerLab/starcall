@@ -1,17 +1,14 @@
 import collections
-import itertools
-from PIL import Image, ImageTransform
-from common import ImageLoader
 import numpy as np
 import glob
 import os
 import sys
-import shutil
 import pandas as pd
 import tqdm
 
 import matplotlib.pyplot as plt
 
+<<<<<<< HEAD
 import skimage.restoration
 
 
@@ -207,6 +204,8 @@ def calculate_offset(image1, image2):
 ####
 
 
+=======
+>>>>>>> 185e1c7f052e465cf6c36ff448ddf1956017e6f4
 def downscale_mean(image, factor):
     image = image[:image.shape[0]//factor*factor,:image.shape[1]//factor*factor]
     image = image.reshape(image.shape[0]//factor, factor, image.shape[1]//factor, factor, *image.shape[2:])
@@ -237,7 +236,7 @@ def stitch_cycles(images, positions, debug=True, progress=False, **kwargs):
         mask = positions[:,0] == cycle
         indices = np.arange(len(positions))[mask]
 
-        result, stats = m2stitch.stitch_images(images[mask], position_indices=positions[mask][:,1:], full_output=True)#, silent=not progress_arg, **kwargs)
+        result, stats = m2stitch.stitch_images(images[mask], position_indices=positions[mask][:,1:], full_output=True, **kwargs)#, silent=not progress_arg, **kwargs)
         for index, row in result.iterrows():
             for j, direction in enumerate(['left', 'top']):
                 if not pd.isna(row[direction]):
