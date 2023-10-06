@@ -8,7 +8,6 @@ import tqdm
 
 import matplotlib.pyplot as plt
 
-<<<<<<< HEAD
 import skimage.restoration
 
 
@@ -204,8 +203,6 @@ def calculate_offset(image1, image2):
 ####
 
 
-=======
->>>>>>> 185e1c7f052e465cf6c36ff448ddf1956017e6f4
 def downscale_mean(image, factor):
     image = image[:image.shape[0]//factor*factor,:image.shape[1]//factor*factor]
     image = image.reshape(image.shape[0]//factor, factor, image.shape[1]//factor, factor, *image.shape[2:])
