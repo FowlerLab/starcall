@@ -1,5 +1,20 @@
 import numpy as np
 
+def debug_progress(debug, progress):
+    if debug is True:
+        debug = print
+    if debug is False:
+        debug = lambda *args: None
+
+    if progress is True:
+        import tqdm
+        progress = tqdm.tqdm
+    if progress is False:
+        progress = lambda x, **kwargs: x
+
+    return debug, progress
+
+
 def standardize_format(image, expected_dims):
     """ Converts an input image into the format
     expected, this being:

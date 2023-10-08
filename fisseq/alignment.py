@@ -156,7 +156,7 @@ def fastnorm_overload(x):
             return np.sqrt(np.sum(x*x))
         return vector_impl
 
-@numba.jit
+@numba.jit(nopython=True)
 def float_string_dist(vec1, vec2, penalty=10):
     last_dists = np.arange(len(vec2),-1,-1, dtype=np.float64)
     cur_dists = np.zeros(len(vec2)+1)
