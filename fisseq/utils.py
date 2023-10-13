@@ -1,6 +1,6 @@
 import numpy as np
 
-def debug_progress(debug, progress):
+def log_env(debug, progress):
     if debug is True:
         debug = print
     if debug is False:
