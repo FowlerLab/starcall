@@ -1,14 +1,53 @@
 import numpy as np
+import time
+import sys
+
+def human_readable(number):
+    scale = min(4, (len(str(int(number))) - 1) // 3)
+    return '{:.3f}'.format(number if scale == 0 else number / (1000 ** scale)) + ['', 'K', 'M', 'G', 'T'][scale]
+
+def format_time(secs):
+    timestr = '{:02}:{:02}'.format(int(secs) // 60 % 60, int(secs) % 60)
+    if secs > 3600:
+        timestr = '{:02}:'.format(int(secs) // 3600) + timestr
+    return timestr
+
+def simple_progress(iterable, total=None):
+    if total is None:
+        total = len(iterable)
+
+    denom_str = str(total)
+
+    start = time.time()
+    lasttime = 0
+    for i,value in enumerate(iterable):
+        yield value
+        dtime = time.time() - start
+        index = i + 1
+
+        if ((dtime - lasttime >= 2 and (lasttime < 2 or index == total // 4 or index == total // 2))
+                or (dtime >= 2 and index == total)):
+            est_time = (dtime / index) * total
+
+            padded_index = ('{:' + str(len(denom_str)) + '}').format(index)
+            print ("  -- {}/{} {:3}% {} elapsed, {} left, done at {}".format(
+                padded_index, denom_str, int(index / total * 100),
+                format_time(dtime),
+                format_time(est_time - dtime),
+                time.strftime("%I:%M %p", time.localtime(start + est_time)),
+            ), file=sys.stderr)
+            lasttime = dtime
+            
 
 def log_env(debug, progress):
     if debug is True:
-        debug = print
+        debug = lambda *args, **kwargs: print(*args, **kwargs, file=sys.stderr)
     if debug is False:
-        debug = lambda *args: None
+        debug = lambda *args, **kwargs: None
 
     if progress is True:
-        import tqdm
-        progress = tqdm.tqdm
+        #import tqdm
+        progress = simple_progress
     if progress is False:
         progress = lambda x, **kwargs: x
 
