@@ -16,6 +16,11 @@ def simple_progress(iterable, total=None):
     if total is None:
         total = len(iterable)
 
+    print_points = [total // 8, total // 4, total // 2, total * 3 // 4]
+
+    if 5 < print_points[0]:
+        print_points.insert(0, 5)
+
     denom_str = str(total)
 
     start = time.time()
@@ -25,7 +30,7 @@ def simple_progress(iterable, total=None):
         dtime = time.time() - start
         index = i + 1
 
-        if ((dtime - lasttime >= 2 and (lasttime < 2 or index == total // 4 or index == total // 2))
+        if ((dtime - lasttime >= 2 and (lasttime < 2 or index in print_points))
                 or (dtime >= 2 and index == total)):
             est_time = (dtime / index) * total
 
