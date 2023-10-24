@@ -16,7 +16,7 @@ def simple_progress(iterable, total=None):
     if total is None:
         total = len(iterable)
 
-    print_points = [total // 8, total // 4, total // 2, total * 3 // 4]
+    print_points = [total // 20, total // 4, total // 2, total * 3 // 4]
 
     if 5 < print_points[0]:
         print_points.insert(0, 5)
