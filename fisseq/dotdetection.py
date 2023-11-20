@@ -9,13 +9,19 @@ import numba
 from . import utils
 
 def dot_filter(image, large_sigma=4):
-    image -= image.mean(axis=(1,2)).reshape(-1,1,1)
-    image /= image.std(axis=(1,2)).reshape(-1,1,1)
+    og_shape = image.shape
+    if len(image.shape) == 3:
+        image = image.reshape((1,) + image.shape)
+
+    image -= image.mean(axis=(0,2,3)).reshape(1,-1,1,1)
+    image /= image.std(axis=(0,2,3)).reshape(1,-1,1,1)
     np.clip(image, 0, None, out=image)
     
-    image -= skimage.filters.gaussian(image, large_sigma, channel_axis=0)
+    for i in range(image.shape[0]):
+        image[i] -= skimage.filters.gaussian(image[i], large_sigma, channel_axis=0)
     np.clip(image, 0, None, out=image)
-    return image
+
+    return image.reshape(og_shape)
 
 def detect_dots(image,
         min_sigma=1,
@@ -28,10 +34,17 @@ def detect_dots(image,
         copy=True):
 
     if copy: image = image.copy()
+
+    if len(image.shape) == 3:
+        image = image.reshape((1,) + image.shape)
+
     image = dot_filter(image)
-    median_index = median_index or len(image) // 2
+
+    maximage = image.max(axis=0)
+
+    median_index = median_index or len(maximage) // 2
     
-    median = np.partition(image, median_index, axis=0)
+    median = np.partition(maximage, median_index, axis=0)
     median -= median[median_index]
     np.max(median, axis=0, out=median[0])
 
@@ -49,7 +62,8 @@ def detect_dots(image,
     sigmas = poses[:,2]
 
     intposes = poses[:,:2].astype(int)
-    values = image[:,intposes[:,0],intposes[:,1]].T
+    values = image[:,:,intposes[:,0],intposes[:,1]]
+    values = values.reshape(image.shape[0] * image.shape[1], -1).T
 
     if return_sigmas:
         return intposes, values, sigmas

@@ -6,6 +6,7 @@ import skimage.morphology
 import sys
 
 from . import utils
+from . import dotdetection
 
 def segment_nuclei(dapi):
     return segment_nuclei_stardist(dapi)
@@ -26,9 +27,16 @@ def segment_nuclei_stardist(dapi):
     return labels
 
 def estimate_cyto(image):
-    #image = image - image.mean(axis=(1,2)).reshape(-1,1,1)
+    cyto = image[3]
+    np.clip(cyto, 0, np.percentile(cyto, 99))
+    #cyto = skimage.morphology.opening(cyto, skimage.morphology.disk(2))
+    return cyto
+    image = image - image.mean(axis=(1,2)).reshape(-1,1,1)
     image = image / image.std(axis=(1,2)).reshape(-1,1,1)
+    dots = dotdetection.dot_filter(image)
+    cyto = image - dots
     cyto = image.min(axis=0)
+    np.clip(cyto, 0, None, out=cyto)
     return cyto
 
 def segment_cyto_cellpose(cyto, dapi, diameter, gpu=False, 
