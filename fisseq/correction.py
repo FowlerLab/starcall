@@ -38,7 +38,7 @@ def estimate_crosstalk(chan, chanref, percent=0.1):
     returns the crosstalk from chanref to chan, or how much chan is dependant
     on chanref.
     """
-    keep = chanref > max(chanref.mean(), 0)
+    keep = chanref > max(np.percentile(chanref, 90), 0)
     ratio = chan[keep] / chanref[keep]
     return np.percentile(ratio, percent)
 
@@ -57,6 +57,35 @@ def estimate_dye_matrix(image):
                 matrix[x,y] = estimate_crosstalk(image[y], image[x])
     print (matrix)
     return matrix
+
+def crosstalk_plot(image, corrected, dye_matrix, name="image"):
+    import matplotlib.pyplot as plt
+
+    image = image.reshape(image.shape[0], -1)
+    corrected = corrected.reshape(corrected.shape[0], -1)
+
+    xposes, yposes = np.meshgrid(range(dye_matrix.shape[0]), range(dye_matrix.shape[1]))
+    xposes, yposes = xposes.reshape(-1), yposes.reshape(-1)
+
+    indices = np.argsort(dye_matrix.reshape(-1))[::-1]
+    pairs = np.stack([xposes[indices], yposes[indices]], axis=1)
+    pairs = [tuple(pair) for pair in np.sort(pairs, axis=1)]
+    pairs = [pairs[i] for i in range(len(pairs)) if pairs[i][0] != pairs[i][1] and pairs[i] not in pairs[:i]]
+
+    fig, axes = plt.subplots(ncols=len(pairs), nrows=2, figsize=(5*len(pairs), 10))
+    
+    for i,pair in enumerate(pairs):
+        axes[0,i].scatter(image[pair[0]], image[pair[1]], s=1)
+        axes[0,i].set_title('Crosstalk of original image')
+        axes[0,i].set_xlabel('GTAC'[pair[0]])
+        axes[0,i].set_ylabel('GTAC'[pair[1]])
+        axes[1,i].scatter(corrected[pair[0]], corrected[pair[1]], s=1)
+        axes[1,i].set_title('Crosstalk of corrected image')
+        axes[1,i].set_xlabel('GTAC'[pair[0]])
+        axes[1,i].set_ylabel('GTAC'[pair[1]])
+    
+    fig.savefig('plots/crosstalk_{}.png'.format(name))
+
 
 class ResponseCurve:
     def __init__(self, *args):
