@@ -13,8 +13,10 @@ def dot_filter(image, large_sigma=4):
     if len(image.shape) == 3:
         image = image.reshape((1,) + image.shape)
 
-    image -= image.mean(axis=(0,2,3)).reshape(1,-1,1,1)
-    image /= image.std(axis=(0,2,3)).reshape(1,-1,1,1)
+    image -= image.mean(axis=(2,3)).reshape(image.shape[0], image.shape[1],1,1)
+    image /= image.std(axis=(2,3)).reshape(image.shape[0], image.shape[1],1,1)
+    #image -= image.mean(axis=(0,2,3)).reshape(1,-1,1,1)
+    #image /= image.std(axis=(0,2,3)).reshape(1,-1,1,1)
     np.clip(image, 0, None, out=image)
     
     for i in range(image.shape[0]):
@@ -38,7 +40,7 @@ def detect_dots(image,
     if len(image.shape) == 3:
         image = image.reshape((1,) + image.shape)
 
-    image = dot_filter(image)
+    #image = dot_filter(image)
 
     maximage = image.max(axis=0)
 
@@ -62,12 +64,10 @@ def detect_dots(image,
     sigmas = poses[:,2]
 
     intposes = poses[:,:2].astype(int)
-    values = image[:,:,intposes[:,0],intposes[:,1]]
-    values = values.reshape(image.shape[0] * image.shape[1], -1).T
 
     if return_sigmas:
-        return intposes, values, sigmas
-    return intposes, values
+        return intposes, sigmas
+    return intposes
 
 def detect_dots_debug(image,
         min_sigma=1,

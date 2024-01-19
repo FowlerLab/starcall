@@ -1,10 +1,17 @@
 import numpy as np
 import time
 import sys
+import math
+
+def memory_report():
+    import psutil
+    return ' '.join([key + '=' + human_readable(val) for key,val in psutil.Process().memory_info()._asdict().items()])
 
 def human_readable(number):
-    scale = min(4, (len(str(int(number))) - 1) // 3)
-    return '{:.3f}'.format(number if scale == 0 else number / (1000 ** scale)) + ['', 'K', 'M', 'G', 'T'][scale]
+    if number < 1000:
+        return str(number)
+    scale = min(4, int(math.log10(number)) // 3)
+    return '{:.3f}'.format(number / (1000 ** scale)) + ['', 'K', 'M', 'G', 'T'][scale]
 
 def format_time(secs):
     timestr = '{:02}:{:02}'.format(int(secs) // 60 % 60, int(secs) % 60)
