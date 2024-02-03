@@ -53,6 +53,8 @@ def detect_dots(image,
     greyimage = median[0]
     tmp_layer = median[1]
 
+    skimage.io.imsave('tmp_dots_greyimage.tif', greyimage)
+
     first_sigma = 1
     second_sigma = 2
     skimage.filters.gaussian(greyimage, second_sigma, output=tmp_layer)
