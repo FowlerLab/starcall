@@ -25,6 +25,25 @@ def dot_filter(image, large_sigma=4):
 
     return image.reshape(og_shape)
 
+def dot_filter2(image, kernel_size=10):
+    og_shape = image.shape
+    if len(image.shape) == 3:
+        image = image.reshape((1,) + image.shape)
+
+    image -= image.mean(axis=(2,3)).reshape(image.shape[0], image.shape[1],1,1)
+    image /= image.std(axis=(2,3)).reshape(image.shape[0], image.shape[1],1,1)
+    #image -= image.mean(axis=(0,2,3)).reshape(1,-1,1,1)
+    #image /= image.std(axis=(0,2,3)).reshape(1,-1,1,1)
+    np.clip(image, 0, None, out=image)
+    
+    footprint = skimage.morphology.disk(kernel_size)
+    for i in range(image.shape[0]):
+        image[i] = skimage.morphology.white_tophat(image[i], footprint)
+
+    np.clip(image, 0, None, out=image)
+
+    return image.reshape(og_shape)
+
 def detect_dots(image,
         min_sigma=1,
         max_sigma=2,
@@ -142,4 +161,23 @@ def gaussian_kernel(radius, sigma):
     kernel = np.zeros((radius*2+1, radius*2+1))
     kernel[radius,radius] = 1
     return skimage.filters.gaussian(kernel, sigma)
+
+
+def call_dots(values):
+    print (values.shape)
+    num_dots, num_cycles, num_base = values.shape
+
+    tsne = sklearn.manifold.TSNE()
+    tsne_poses = tsne.fit_transform(values.reshape(num_dots * num_cycles, num_base)).reshape(num_dots, num_cycles, 2)
+
+    fig, axes = plt.subplots(nrows=num_cycles, figsize=(8, 5*num_cycles))
+    for cycle in range(num_cycles):
+        poses = tsne_poses[:,cycle]
+        axes[cycle].scatter(poses[:,0], poses[:,1])
+        axes[cycle].set_title("Cycle " + i)
+
+    fig.savefig('plots/calling_dots.png')
+
+    pass
+
 

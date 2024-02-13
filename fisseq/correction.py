@@ -33,13 +33,48 @@ def color_correct(image, dye_matrix=None):
     dye_levels[dye_levels<0] = 0
     return dye_levels.reshape(image.shape).astype(image.dtype)
 
-def estimate_crosstalk(chan, chanref, percent=0.1):
+def estimate_crosstalk(chan, chanref, percent=0.1, bins=8):
     """ Calculates the estimated crosstalk between the two channels,
     returns the crosstalk from chanref to chan, or how much chan is dependant
     on chanref.
     """
+    import matplotlib.pyplot as plt
+    fig, axis = plt.subplots()
+
+    num_bins = bins
+    axis.scatter(chanref, chan)
+    bins = np.linspace(chanref.min(), chanref.max(), num_bins)
+    #bins = np.percentile(chanref, np.linspace(0, 100, bins))
+    for val in bins:
+        axis.plot([val, val], [0, chan.max()], color='red')
+
+    mins = []
+    refvals = []
+    for i in range(len(bins)-1):
+        print (i)
+        mask = (bins[i]<=chanref) & (chanref<=bins[i+1])
+        print (np.count_nonzero(mask))
+        if np.any(mask):
+            min_index = np.argmin(chan[mask])
+            mins.append(chan[mask][min_index])
+            refvals.append(chanref[mask][min_index])
+    axis.plot(refvals, mins)
+
+    fig.savefig('plots/estimate_crosstalk.png')
+    ratios = np.sort(np.array(mins) / refvals)
+    crosstalk = ratios[num_bins//4-1]
+    #crosstalk = np.median(np.array(mins) / refvals)
+    if crosstalk > 0.5:
+        kslfsld
+    return crosstalk
+
     keep = chanref > max(np.percentile(chanref, 90), 0)
     ratio = chan[keep] / chanref[keep]
+    axis.hist(ratio, bins=100, alpha=0.5)
+    axis.hist(chan.flatten() / chanref.flatten(), bins=100, alpha=0.5)
+    fig.savefig('plots/estimate_crosstalk.png')
+    print (np.percentile(ratio, percent))
+    skdfjls
     return np.percentile(ratio, percent)
 
 def estimate_dye_matrix(image):
