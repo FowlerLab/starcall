@@ -142,4 +142,38 @@ def calculate_dye_matrix(excitation_wavelengths, dyes, filter_wavelengths):
             The wavelengths 
     """
     return None
-            
+
+
+def estimate_background(images, percent=5):
+    #background = np.percentile(images, 5, axis=0)
+    old_shape = images.shape
+    images = images.reshape(images.shape[0], -1)
+    background = np.zeros(images.shape[1:], images.dtype)
+
+    #split up work to avoid casting whole thing to float, keep memory down
+    batch_size = images.shape[1] // 64
+    for i in range(0, images.shape[1], batch_size):
+        section = images[:,i:i+batch_size]
+        section = np.percentile(section, percent, axis=0)
+        #section = section.mean(axis=0)
+        background[i:i+batch_size] = section
+
+    background = background / background.max()
+    background = background.reshape(old_shape[1:])
+    return background
+
+def illumination_correction(images, out=None, background=None):
+    if background is None:
+        background = calculate_background(images)
+    if out is None:
+        out = np.empty_like(images)
+
+    for i in range(len(images)):
+        newimage = images[i] / background
+        np.clip(newimage, np.iinfo(images.dtype).min, np.iinfo(images.dtype).max, out=newimage)
+        out[i] = (images[i] / background).astype(images.dtype)
+
+    return out
+
+
+
