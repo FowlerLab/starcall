@@ -1,4 +1,6 @@
 import numpy as np
+import skimage.morphology
+import skimage.filters
 
 example_matrix = np.array([
     # G      T      A      C
@@ -160,6 +162,10 @@ def estimate_background(images, percent=5):
 
     background = background / background.max()
     background = background.reshape(old_shape[1:])
+    #mask = skimage.morphology.disk(8)
+    for i in range(len(background)):
+        #background[i] = skimage.morphology.erosion(background[i], mask)
+        background[i] = skimage.filters.gaussian(background[i], 30)
     return background
 
 def illumination_correction(images, out=None, background=None):
@@ -171,7 +177,7 @@ def illumination_correction(images, out=None, background=None):
     for i in range(len(images)):
         newimage = images[i] / background
         np.clip(newimage, np.iinfo(images.dtype).min, np.iinfo(images.dtype).max, out=newimage)
-        out[i] = (images[i] / background).astype(images.dtype)
+        out[i] = newimage.astype(images.dtype)
 
     return out
 
