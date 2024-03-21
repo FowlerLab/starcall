@@ -1,4 +1,6 @@
 import numpy as np
+import skimage.morphology
+import skimage.filters
 
 example_matrix = np.array([
     # G      T      A      C
@@ -144,22 +146,26 @@ def calculate_dye_matrix(excitation_wavelengths, dyes, filter_wavelengths):
     return None
 
 
-def estimate_background(images, percent=5):
+def estimate_background(images, percent=5, gaussian=50):
     #background = np.percentile(images, 5, axis=0)
     old_shape = images.shape
     images = images.reshape(images.shape[0], -1)
-    background = np.zeros(images.shape[1:], images.dtype)
+    background = np.zeros(images.shape[2:], images.dtype)
 
     #split up work to avoid casting whole thing to float, keep memory down
     batch_size = images.shape[1] // 64
     for i in range(0, images.shape[1], batch_size):
         section = images[:,i:i+batch_size]
-        section = np.percentile(section, percent, axis=0)
+        section = np.percentile(section, percent, axis=(0,1))
         #section = section.mean(axis=0)
         background[i:i+batch_size] = section
 
     background = background / background.max()
     background = background.reshape(old_shape[1:])
+    #mask = skimage.morphology.disk(8)
+    for i in range(len(background)):
+        #background[i] = skimage.morphology.erosion(background[i], mask)
+        background[i] = skimage.filters.gaussian(background[i], gaussian, mode='reflect')
     return background
 
 def illumination_correction(images, out=None, background=None):
@@ -169,9 +175,9 @@ def illumination_correction(images, out=None, background=None):
         out = np.empty_like(images)
 
     for i in range(len(images)):
-        newimage = images[i] / background
+        newimage = images[i] / background.reshape(1, *background.shape)
         np.clip(newimage, np.iinfo(images.dtype).min, np.iinfo(images.dtype).max, out=newimage)
-        out[i] = (images[i] / background).astype(images.dtype)
+        out[i] = newimage.astype(images.dtype)
 
     return out
 
