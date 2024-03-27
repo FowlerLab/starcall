@@ -149,7 +149,7 @@ def calculate_dye_matrix(excitation_wavelengths, dyes, filter_wavelengths):
 def estimate_background(images, percent=5, gaussian=50):
     #background = np.percentile(images, 5, axis=0)
     old_shape = images.shape
-    images = images.reshape(images.shape[0], -1)
+    #images = images.reshape(images.shape[0], -1)
     background = np.zeros(images.shape[2:], images.dtype)
 
     #split up work to avoid casting whole thing to float, keep memory down
