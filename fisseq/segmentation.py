@@ -40,7 +40,7 @@ def estimate_cyto(image):
     return cyto
 
 def segment_cyto_cellpose(cyto, dapi, diameter, gpu=False, 
-                     net_avg=False, cyto_model='cyto', reconcile=True, logscale=True,
+                     cyto_model='cyto', reconcile=True, logscale=True,
                      remove_edges=True):
     from cellpose.models import Cellpose
 
@@ -48,7 +48,7 @@ def segment_cyto_cellpose(cyto, dapi, diameter, gpu=False,
         cyto = image_log_scale(cyto)
     img = np.array([dapi, cyto])
 
-    model_cyto = Cellpose(model_type=cyto_model, gpu=gpu, net_avg=net_avg)
+    model_cyto = Cellpose(model_type=cyto_model, gpu=gpu)
     
     cells, _, _, _  = model_cyto.eval(img, channels=[2, 1], diameter=diameter)
 
