@@ -3,6 +3,8 @@ import skimage.feature
 import sklearn.neighbors
 import scipy.sparse
 
+import matplotlib.pyplot as plt
+
 class DistanceMatrix:
     def __init__(self, size1, size2=None, dtype=np.float32, value=None):
         self.size1, self.size2 = size1, size2 or size1
@@ -181,6 +183,7 @@ def pair_dots2(poses1, poses2, n_neighbors=10, penalty=5, progress=False, debug=
     #features1, features2 = dists1, dists2
     features1 = poses1[indices1] - poses1.reshape(poses1.shape[0], 1, poses1.shape[1])
     features2 = poses2[indices2] - poses2.reshape(poses2.shape[0], 1, poses2.shape[1])
+    """
     print (indices1[260])
     print (indices2[260])
     print (features1[260])
@@ -200,6 +203,7 @@ def pair_dots2(poses1, poses2, n_neighbors=10, penalty=5, progress=False, debug=
 
     print_stats(np.linalg.norm(features1 - features2, axis=2))
     print_stats(np.linalg.norm(features1 - np.roll(features2, 20, axis=0), axis=2))
+    """
 
     def dist_func(i, j):
         #if max_distance:
@@ -223,6 +227,45 @@ def pair_dots3(poses1, poses2, n_neighbors=50):
     axis.hist(dists.flatten(), bins=100)
     fig.savefig('plots/dist_hist.png')
     """
+
+def prepare_dists(poses):
+    #dists = np.zeros((len(poses), len(poses)))
+    dists = []
+    offsets = []
+    for i in range(len(poses)):
+        for j in range(i+1,len(poses)):
+            offsets.append(np.abs(poses[i] - poses[j]))
+            dist = np.linalg.norm(poses[i] - poses[j])
+            dists.append(dist)
+    dists, offsets = np.array(dists), np.array(offsets)
+
+    indices = np.argsort(dists)
+    return dists[indices], offsets[indices]
+
+def pair_dots4(poses1, poses2):
+    dists1, offsets1 = prepare_dists(poses1)
+    dists2, offsets2 = prepare_dists(poses2)
+    thresh = 500
+    dists1, offsets1 = dists1[dists1<500], offsets1[dists1<500]
+    dists2, offsets2 = dists2[dists2<500], offsets2[dists2<500]
+
+    diffs = []
+    i = 0
+    j = 0
+    while i < len(dists1) and j < len(dists2):
+        #diffs.append(dists1[i] - dists2[j])
+        #if dists1[i] > 50 and dists2[j] > 500:
+        diffs.append(np.linalg.norm(offsets1[i] - offsets2[j]))
+
+        if dists1[i] < dists2[j]:
+            i += 1
+        else:
+            j += 1
+
+    fig, axis = plt.subplots()
+    axis.hist(diffs, bins=200)
+    fig.savefig('plots/dot_dist_diff_hist.png')
+    return []
 
 def filter_pairs1(poses1, poses2, matches, n_neighbors=25):
     neighbors1 = sklearn.neighbors.NearestNeighbors(n_neighbors=n_neighbors).fit(poses1)
