@@ -210,7 +210,7 @@ def downscale_mean(image, factor):
     return np.mean(image, axis=(1,3)).astype(image.dtype)
 
 
-Constraint = collections.namedtuple('Constraint', ['image1', 'image2', 'score', 'offset'])
+#Constraint = collections.namedtuple('Constraint', ['image1', 'image2', 'score', 'offset'])
 
 def stitch_cycles(images, positions, debug=True, progress=False, **kwargs):
     """ Stitches a time sequence of composite images together, aligning both between tiles as well as
