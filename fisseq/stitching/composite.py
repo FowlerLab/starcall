@@ -1,3 +1,4 @@
+import sys
 import collections
 import pickle
 import math
@@ -11,11 +12,12 @@ import sklearn.mixture
 import imageio.v3 as iio
 import warnings
 
-from .estimate_translation import calculate_offset, score_offset
+from .alignment import calculate_offset, score_offset
 from .stage_model import SimpleOffsetModel, GlobalStageModel
 from .constraints import Constraint
-from . import merging, estimate_translation
+from . import merging, alignment
 from .. import utils
+
 
 
 @dataclasses.dataclass
@@ -95,6 +97,196 @@ class SequentialExecutor(concurrent.futures.Executor):
 
 
 class CompositeImage:
+    """
+    This class encapsulates the whole stitching process, the smallest example of stitching is
+    shown below:
+
+        composite = fisseq.stitching.CompositeImage()
+        composite.add_images(images)
+        composite.calc_constraints()
+        composite.filter_constraints()
+        composite.solve_constraints(filter_outliers=True)
+        full_image = composite.stitch_images()
+
+    This class is meant to be adaptable to many different stitching use cases, and each step
+    can be customized and configured. The general steps for the stitching of a group images are as follows:
+
+
+    Creating the composite
+
+    To begin we have to instantiate the CompositeImage class.
+    The full method signature can be found at
+    __init__() but some important parameters are described below:
+
+    The executor is what the composite uses to perform intensive computation
+    tasks, namely calculating the alignment of all the images. If provided
+    it should be a concurrent.futures.Executor object, for example
+    concurrent.futures.ThreadPoolExecutor. Importantly, concurrent.futures.ProcessPoolExecutor
+    does not work very well as the images need to be passed to the executor
+    and in the case of ProcessPoolExecutor this means they need to be pickled
+    and unpickled to get to the other process. ThreadPoolExecutor doesn't need
+    this as the threads can share memory, but it doesn't take full advantage of
+    multithreading as the python GIL prevents python code from running in parallel.
+    Luckily most of the intensive computation happens in numpy functions which don't
+    hold the GIL, so ThreadPoolExecutor is usually the best choice.
+
+    The arguments debug and process define how logging should happen with the composite.
+    If debug is True logging messages summarizing the results of different operations
+    will be printed out to stderr. Setting it to False will disable these messages.
+    If process is True a progress bar will be printed out during long running steps.
+    The default progress bar is a simple ascii bar that works whether the output is
+    a tty or a file, but if you want you can pass a replacement in instead of setting
+    it to True, such as tqdm.
+
+    An example of setting up the composite would be something similar to this:
+
+    import fisseq
+    import concurrent.futures
+    import tqdm
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
+        composite = fisseq.stitching.CompositeImage(executor=executor, debug=True, progress=tqdm.tqdm)
+
+
+    Setting the aligner
+
+    The aligner of the composite is a class that encapsulates the algorithm used to align two images onto
+    each other. The base class Aligner and the fisseq.alignment module have more information on the specifics but basically
+    an aligner has a function that takes two images and returns the offset from one image to another
+    that has the best overlap. This is normally measured using the normalized cross correlation
+    of the overlapping regions, using the function alignment.ncc, but different aligner classes
+    can use different ways to find and score overlapping regions.
+
+    The main aligner provided is the FFTAligner, which uses the phase cross correlation algorithm
+    to find the best overlapping region. By default this one is used, however if you want to modify
+    the parameters you can set the aligner to a new instance of it. For example:
+        composite.set_aligner(fisseq.stitching.FFTAligner(num_peaks=5, precalculate_fft=False))
+
+    The other aligner provided is the FeatureAligner, which uses feature based methods to align the images.
+    This is quite a bit faster than the FFTAligner, but it is not as accurate or reliable, so be aware that
+    results might not be as good.
+
+    As with many of the classes used for stitching, the aligner is meant to be customized and you are
+    encouraged to subclass the Aligner class and make your own method. The two methods needed for an
+    Aligner class are described in its docs.
+
+
+    Adding the images
+
+    Once the composite is set up we can add the images, and this is done through the add_images()
+    method. There are a couple ways of adding images, depending on how much information you have on the images:
+
+    First of all, you can just add the images with no positions, meaning they will all default to being at 0,0.
+    This will work out, as when you calculate constraints between images it will calculate constraints for all
+    possible images and filter out constraints that have no overlap. However the number of constraints that have
+    to be calculated grows exponentially with the number of images, and if you have positional information on your
+    images it is best to pass that in to help with the alignment. If you would like to use this method but are running
+    into computational limits, the section on pruning constraints below can be helpful.
+        composite.add_images(images)
+
+    If your images are taken on a grid you can pass in their positions as grid positions, by setting the scale
+    parameter to 'tile'. For example:
+        positions=[(0,0), (0,1), (1,0), (1,1)]
+        composite.add_images(images, positions=positions, scale='tile')
+    Now when constraints are calculated only nearby images will be checked, speeding up computation a lot.
+
+    If your images are not on a grid or you have the exact position they were taken in, you can also specify
+    positions in pixels instead of grid positions, to do this simply set the scale parameter to 'pixel'
+    and the positions passed in will be interpreted as pixel coordinates.
+
+    When specifying positions, you can also specify more than two dimensions. The first two are the x and y
+    dimensions of the images, but a z dimension can be added if you are doing 3 dimensional stitching or in our case
+    if you are doing fisseq and want to make sure all the cycles line up perfectly. In the case of fisseq,
+    you can add the cycle index as the z coordinate for the image.
+
+
+    Calculating constraints
+
+    Once images have been added we need to calculate the constraints between overlapping images. This is done
+    with the calc_constraints() function. For usual usage you can run it with no parameters,
+    but if you want to be specific about which images are overlapping it takes in an argument called pairs,
+    which should be a sequence of tuples, each being a pair of image indices that should be checked for overlap.
+    If pairs is not specified it defaults to find_unconstrained_pairs(), which finds all image
+    pairs that have overlap but don't have a constraint between them. The two lines below both work to calculate
+    constraints:
+        composite.calc_constraints()
+        composite.calc_constraints(composite.find_unconstrained_pairs())
+
+    One important parameter is precalculate, if True the results of the precalculation step will be cached
+    for each image, saving on computation time but increasing memory usage.
+
+    The find_unconstrained_pairs function also has some parameters that affect how it looks for overlap,
+    the most useful one being overlap_threshold. This is a value in pixels that specifies how far images
+    have to overlap to be considered overlapping. This can also be negative, meaning images that are within
+    a certain pixel distance to touching will be considered overlapping. This is useful if you want to make sure
+    that you find all overlapping images, even if your original positions are not very accurate. For example,
+    the line below will expand the search by 2000 pixels and hopefully find more overlap
+        composite.calc_constraints(composite.find_unconstrained_pairs(overlap_threshold=(-2000, -2000)))
+
+    Another use would be for fisseq, where you want to calculate constraints across all cycles and not just
+    adjacent cycles. As described before fisseq cycles can be represented using the z axis, so we can expand
+    the search in that z axis and calculate constraints between all cycles:
+        composite.calc_constraints(composite.find_unconstrained_pairs(overlap_threshold=(0, 0, -12))
+
+
+    Filtering constraints
+
+    After calculating constraints for all overlapping images, we have to filter out constraints that aren't accurate.
+    Unfortunately the alignment algorithms are not perfect and sometimes they miss overlap, so we need to filter out
+    constraints that have low scores or don't fit in with the other constraints. There are a couple steps of this,
+    the first being filtering based on scores:
+        composite.filter_constraints()
+    This method, filter_constraints(), looks at the scores of all constraints and calculates a random
+    set of bad constraints to find a good score threshold to eliminate any constraints that are not accurate. This
+    is necessary because the scores returned by the alignment algorithms depend on the features present in the images,
+    and using a fixed threshold would not work for all image types.
+
+    An optional secondary filtering step that can be used is the solve_constraints() method. Normally
+    we call this method when we want to solve for the global position of the images, but we can also call this method
+    to attempt to solve the constraints, and remove any that don't seem to fit with the other constraints present.
+    To do this we pass in the arguments as shown:
+        composite.solve_constraints(apply_positions=False, filter_outliers=True)
+
+
+    Estimating missing constraints
+
+    After filtering out all the inaccurate constraints, we may be left with images that don't have any constraints
+    to other images. This is especially common when there are not enough features in some areas of the image to
+    successfully line up the images. To account for this, we can use a stage model to learn the movement of the microscope,
+    and estimate where images that weren't able to be aligned should be. Importantly this only will work if the movement
+    of your microscope is predictable, ie it scans in a grid pattern, and you have the positions or grid positions for
+    images. To estimate these constraints we use the methods estimate_stage_model() and model_constraints().
+        composite.estimate_stage_model()
+        composite.model_constraints()
+    More information can be found in the docs for each function, and about the different possible stage models at fisseq.stage_model
+
+
+    Solving constraints
+
+    After all the constraints are ready, we can solve them all globally to get the positions
+    for each image. This is done by representing the whole composite as an overconstrained linear system,
+    where each constraint is two equations linking the x and y coordinates of two images.
+    This is all done in the solve_constraints() function, and calling it will globally solve
+    all the constraints and apply the new positions to all images.
+        composite.solve_constraints()
+    Sometimes the solver can have trouble solving the constraints, especially if inaccurate constraints are still
+    present when solving. If this happens and it isn't able to find a good solution, it will throw an error.
+    A simple way to try to solve this is by passing the filter_outliers=True argument, which will tell it to try
+    to remove constraints that do not align with others around them. However this doesn't always work, if the error
+    persists a larger change may be needed to help. See the troubleshooting section for more information.
+
+
+    Stitching images
+
+    The final step left is to stitch the images together into a single composite image. This is done
+    with the stitch_images() function.
+        full_image = composite.stitch_images()
+
+    The method that this function merges the images together can be configured by passing a Merger instance,
+    by default it will use MeanMerger. More information on mergers can be found in the docs of the Merger class
+    and the fisseq.stitching.merging module.
+    """
+
     def __init__(self, aligner=None, precalculate=False, debug=True, progress=False, executor=None):
         self.images = []
         self.greyimages = []
@@ -104,12 +296,15 @@ class CompositeImage:
         self.stage_model = None
         self.set_logging(debug, progress)
         self.set_executor(executor)
+        self.set_aligner(aligner)
 
-        self.aligner = aligner or estimate_translation.FFTAligner()
         self.precalculate = precalculate
 
     def set_executor(self, executor):
         self.executor = executor or SequentialExecutor()
+
+    def set_aligner(self, aligner, rescore_constraints=False):
+        self.aligner = aligner or alignment.FFTAligner()
 
     def set_logging(self, debug=True, progress=False):
         self.debug, self.progress = utils.log_env(debug, progress)
@@ -126,11 +321,13 @@ class CompositeImage:
         composite.mapping = None
 
     def save(self, path, save_images=True):
-        """ Saves this composite to the given path. Can be restored with the `CompositeImage.load`
+        """ Saves this composite to the given path. Can be restored with the `CompositeImage.load()`
         function.
 
             save_images: bool, whether the images should be included in the save file. If they are
-                excluded the programmer needs to restore them when loading.
+                excluded the programmer needs to restore them when loading. Not saving the images
+                can reduce the memory needed for the composite file and speed up loading and saving
+                dramatically
         """
 
         obj = dict(
@@ -151,7 +348,7 @@ class CompositeImage:
 
     @classmethod
     def load(cls, path, **kwargs):
-        """ Loads a composite previously saved with `CompositeImage.save` to the given
+        """ Loads a composite previously saved with `CompositeImage.save()` to the given
         path. If the composite was saved without images they should be restored by setting
         composite.images to a list of the images.
         """
@@ -215,11 +412,16 @@ class CompositeImage:
                 If a sequence is given, each element can be any of the previous values,
                 which are applied to each axis.
         """
-        positions = np.asarray(positions)
+        if positions is None and boxes is None:
+            positions = [(0,0)] * len(images)
+        #assert positions is not None or boxes is not None, "Must specify positions or boxes"
+        if positions is None:
+            n_dims = len(boxes[0].pos1)
+        else:
+            positions = np.asarray(positions)
+            n_dims = positions.shape[1]
         #assert len(self.imageshape(images[0])) == 2, "Only 2d images are supported"
-        assert positions is not None or boxes is not None, "Must specify positions or boxes"
 
-        n_dims = positions.shape[1]
         self.n_dims = n_dims
 
         if scale == 'pixel':
@@ -246,8 +448,22 @@ class CompositeImage:
         
         self.images.extend(images)
 
+    def add_image(self, image, position=None, box=None, scale='pixel', imagescale=1):
+        return self.add_images([image], 
+            positions = position and [position],
+            boxes = box and [box],
+            scale = scale, imagescale = imagescale)
+
     def add_split_image(self, image, num_tiles=None, tile_shape=None, overlap=0.1):
-        """ Adds an image split into a number of tiles
+        """ Adds an image split into a number of tiles. This can be used to divide up
+        a large image into smaller peices for efficient processing. The resulting
+        images are guaranteed to all be the same size.
+        A common pattern would be:
+
+        composite.add_split_image(image, 10)
+        for i in range(len(composite.images)):
+            composite.images[i] = process(composite.images[i])
+        result = composite.stitch_images()
 
             image: ndarray
                 the image that will be split into tiles
@@ -352,7 +568,8 @@ class CompositeImage:
 
         for (i,j), constraint in other_composite.constraints.items():
             self.constraints[(i+start_index,j+start_index)] = Constraint(
-                    constraint.score, constraint.dx * scale_conversion, constraint.dy * scale_conversion, constraint.modeled)
+                    dx=constraint.dx * scale_conversion, dy=constraint.dy * scale_conversion, 
+                    score=constraint.score, modeled=constraint.modeled, error=constraint.error * scale_conversion)
 
         if align_coords:
             pass
@@ -421,7 +638,7 @@ class CompositeImage:
             scale_factor: float or int
                 Scale of images in this composite, as a multiplier. Eg a scale_factor of
                 10 will result in each pixel in images corresponding to 10 pixels in the
-                output of functions like `CompositeImage.stitch_images` or when merging composites together.
+                output of functions like `CompositeImage.stitch_images()` or when merging composites together.
         """
         self.scale = scale_factor
 
@@ -511,7 +728,7 @@ class CompositeImage:
 
         return composite.constraints.keys()
 
-    def calc_constraints(self, pairs=None, precalculate=False, return_constraints=False, debug=True, **kwargs):
+    def calc_constraints(self, pairs=None, precalculate=False, return_constraints=False, use_previous_constraints=True, debug=True, **kwargs):
         """ Estimates the pairwise translations of images and add thems as constraints
         in the montage
 
@@ -520,7 +737,7 @@ class CompositeImage:
                 The indices of image pairs to add constraints to. Defaults to
                 all images that overlap or are adjacent based on the estimated
                 positions that don't already have constraints, see 
-                `CompositeImage.find_unconstrained_pairs` for more info.
+                `CompositeImage.find_unconstrained_pairs()` for more info.
                 Important: the pairs given are not checked for overlap, so invalid
                 constraints could be generated if specific indices are passed in.
 
@@ -556,6 +773,7 @@ class CompositeImage:
                 image1 = self.images[index1], image2 = self.images[index2],
                 precalc1 = precalcs[index1], precalc2 = precalcs[index2],
                 shape1 = self.boxes[index1].size()[:2], shape2 = self.boxes[index2].size()[:2],
+                previous_constraint = self.constraints.get((index1, index2), None) if use_previous_constraints else None,
             ))
 
         for (index1, index2), future in self.progress(zip(pairs, futures), total=len(futures)):
@@ -793,7 +1011,7 @@ class CompositeImage:
                 The indices of image pairs to add constraints to. Defaults to
                 all images that overlap or are adjacent based on the estimated
                 positions that don't already have constraints, see 
-                `CompositeImage.find_unconstrained_pairs` for more info.
+                `CompositeImage.find_unconstrained_pairs()` for more info.
                 Important: the pairs given are not checked for overlap, so invalid
                 constraints could be generated if specific indices are passed in.
                 Also passing a pair that already has a constraint will overwrite it
@@ -823,7 +1041,7 @@ class CompositeImage:
                 "Image offset from stage model does not contain any overlap."
                 " The stage model may not have correctly modeled the movement")
             score = score_offset(self.images[i], self.images[j], dx, dy) * score_multiplier
-            constraints[(i,j)] = Constraint(score, dx, dy, modeled=True)
+            constraints[(i,j)] = Constraint(score=score, dx=dx, dy=dy, modeled=True)
 
         self.debug('Added', len(constraints) - start_size, 'calculated constraints using stage model')
 
@@ -967,7 +1185,7 @@ class CompositeImage:
 
 
     def stitch_images(self, indices=None, real_images=None, out=None, bg_value=None, return_bg_mask=False,
-            mins=None, maxes=None, keep_zero=False, merger=merging.MeanMerger):
+            mins=None, maxes=None, keep_zero=False, merger=None):
         """ Combines images in the composite into a single image
             
             indices: sequence of int
@@ -996,6 +1214,7 @@ class CompositeImage:
 
         if indices is None:
             indices = list(range(len(self.images)))
+        merger = merger or merging.MeanMerger()
 
         if type(indices[0]) == bool:
             indices = [i for i in range(len(indices)) if indices[i]]
@@ -1003,20 +1222,15 @@ class CompositeImage:
         if keep_zero:
             mins = 0
 
-        self.debug(mins, maxes)
         start_mins = np.array(self.boxes.pos1.min(axis=0)[:2])
         start_maxes = np.array(self.boxes.pos2.max(axis=0)[:2])
-        self.debug(start_mins, start_maxes)
         
         if mins is not None:
             start_mins[:] = mins
         if maxes is not None:
             start_maxes[:] = maxes
-        self.debug(start_mins, start_maxes)
 
         mins, maxes = start_mins, start_maxes
-
-        self.debug (mins, maxes)
 
         if keep_zero:
             mins = np.zeros_like(mins)
@@ -1025,9 +1239,9 @@ class CompositeImage:
             real_images = self.images
 
         example_image = self.fullimagearr(real_images[0])
-        self.debug(example_image.shape, 'example shape')
+        
         full_shape = tuple((maxes - mins) * self.scale) + example_image.shape[2:]
-        merger = merger(full_shape, example_image.dtype)
+        merger.create_image(full_shape, example_image.dtype)
         if out is not None:
             assert merger.image.shape == out.shape and merger.image.dtype == out.dtype, (
                 "Provided output image does not match expected shape or dtype: {} {}".format(merger.image.shape, merger.image.dtype))
@@ -1037,28 +1251,19 @@ class CompositeImage:
             pos1 = ((self.boxes[i].pos1[:2] - mins) * self.scale).astype(int)
             pos2 = ((self.boxes[i].pos2[:2] - mins) * self.scale).astype(int)
             image = self.fullimagearr(real_images[i])
-            #self.debug(image.shape)
+
             if np.any(pos2 - pos1 != image.shape[:2]):
-                self.debug(pos1, pos2, pos2 - pos1)
-                self.debug(image.shape)
                 warnings.warn("resizing some images")
-                image = skimage.transform.resize(image, pos2 - pos1)
+                image = skimage.transform.resize(image, pos2 - pos1, preserve_range=True).astype(image.dtype)
             
             image = image[max(0,-pos1[0]):,max(0,-pos1[1]):]
-            #self.debug(pos1, pos2, image.shape)
+
             pos1 = np.maximum(0, np.minimum(pos1, maxes - mins))
             pos2 = np.maximum(0, np.minimum(pos2, maxes - mins))
-            #self.debug(pos1, pos2, image.shape)
-            #image = image[max(0,-pos1[0]):,max(0,-pos1[1]):]
-            #self.debug(pos1, pos2, image.shape)
-            #self.debug(max(0,-pos1[0]),max(0,-pos1[1]))
+
             image = image[:pos2[0]-pos1[0],:pos2[1]-pos1[1]]
-            #self.debug(pos1, pos2, image.shape)
+
             if image.size == 0: continue
-            self.debug(self.boxes[i])
-            self.debug((self.boxes[i].pos1[:2] - mins) * self.scale)
-            self.debug((self.boxes[i].pos2[:2] - mins) * self.scale)
-            self.debug(image.shape, pos1, pos2, mins, maxes)
 
             position = (slice(pos1[0], pos2[0]), slice(pos1[1], pos2[1]))
             merger.add_image(image, position)
@@ -1077,10 +1282,8 @@ class CompositeImage:
         import matplotlib.pyplot as plt
         import matplotlib.patches
 
-            
-
         groups = [list(range(len(self.boxes)))]
-        const_groups = self.constraints.keys()
+        const_groups = [self.constraints.keys()]
         names = ['']
         if self.boxes[0].pos1.shape[0] == 3:
             groups = []
@@ -1111,7 +1314,6 @@ class CompositeImage:
         fig, axes = plt.subplots(nrows=grid_size, ncols=grid_size, figsize=(axis_size*grid_size,axis_size*grid_size), squeeze=False, sharex=True, sharey=True)
 
         for indices, const_pairs, axis, name in zip(groups, const_groups, axes.flatten(), names):
-            print (name)
 
             for i,index in enumerate(indices):
                 x, y = self.boxes[index].pos1[:2]
@@ -1148,6 +1350,122 @@ class CompositeImage:
             axis.yaxis.set_tick_params(labelbottom=True)
 
         fig.savefig(path)
+
+    def html_summary(self, path, score_func=None):
+        import xml.etree.ElementTree as ET
+        html = ET.Element('html')
+
+        head = ET.SubElement(html, 'head')
+        style = ET.SubElement(head, 'style')
+        style.text = """
+        g .fade-hover {
+            opacity: 0.2;
+        }
+        g:hover .fade-hover {
+            opacity: 1;
+        }
+        g .show-hover {
+            display: none;
+        }
+        g:hover .show-hover {
+            display: block;
+        }
+        """
+
+        body = ET.SubElement(html, 'body')
+        
+        mins, maxes = self.boxes.pos1.min(axis=0), self.boxes.pos2.max(axis=0)
+        svg = ET.SubElement(body, 'svg', viewbox="{} {} {} {}".format(mins[0], mins[1], maxes[0], maxes[1]))
+
+        for i,box in enumerate(self.boxes):
+            class_names = 'box'
+            if len(box.pos1) == 3:
+                class_names += ' start{0} end{0}'.format(int(box.pos1[2]))
+            group = ET.SubElement(svg, 'g', attrib={
+                "class": class_names,
+            })
+            rect = ET.SubElement(group, 'rect', attrib={
+                "class": "fade-hover",
+                "x": str(box.pos1[0]), "y": str(box.pos1[1]),
+                "width": str(box.size()[0]), "height": str(box.size()[1]),
+                "stroke": 'black', "fill": 'transparent',
+                "stroke-width": str(int(box.size()[:2].min()) // 10),
+            })
+
+            text = ET.SubElement(group, 'text', attrib={
+                "class": "show-hover",
+                "x": str(box.pos1[0] + box.size()[0] // 2),
+                "y": str(box.pos1[1] + box.size()[1] * 2 // 3),
+                "font-size": str(box.size()[1] // 2),
+                "text-anchor": "middle",
+            })
+            text.text = str(i)
+
+        for (i,j), constraint in self.constraints.items():
+            box1, box2 = self.boxes[i], self.boxes[j]
+            class_names = 'constraint'
+            if len(box1.pos1) == 3:
+                class_names += ' start{} end{}'.format(int(box1.pos1[2]), int(box2.pos1[2]))
+
+            group = ET.SubElement(svg, 'g')
+            center = (box1.pos1 + box1.pos2 + box2.pos1 + box2.pos2) // 4
+            line = ET.SubElement(group, 'line', attrib={
+                "class": "fade-hover",
+                "x1": str(center[0] - constraint.dx // 2),
+                "y1": str(center[1] - constraint.dy // 2),
+                "x2": str(center[0] + constraint.dx // 2),
+                "y2": str(center[1] + constraint.dy // 2),
+                "stroke": "rgb(50% {}% 50%)".format(int(constraint.score * 100)),
+                "stroke-width": str(min(box1.size()[:2].min(), box2.size()[:2].min()) // 2),
+                "stroke-linecap": "round",
+            })
+
+            line = ET.SubElement(group, 'line', attrib={
+                "class": "show-hover",
+                "x1": str(box1.pos1[0] + box1.size()[0] / 2),
+                "y1": str(box1.pos1[1] + box1.size()[1] / 2),
+                "x2": str(box2.pos1[0] + box2.size()[0] / 2),
+                "y2": str(box2.pos1[1] + box2.size()[1] / 2),
+                "stroke": "black",
+                "stroke-width": str(min(box1.size()[:2].min(), box2.size()[:2].min()) // 40),
+            })
+
+            #"""
+            rect = ET.SubElement(group, 'rect', attrib={
+                "class": "show-hover",
+                "x": str(box1.pos1[0]), "y": str(box1.pos1[1]),
+                "width": str(box1.size()[0]), "height": str(box1.size()[1]),
+                "stroke": 'black', "fill": 'transparent',
+                "stroke-width": str(int(box1.size().mean()) // 10),
+            })
+            text = ET.SubElement(group, 'text', attrib={
+                "class": "show-hover",
+                "x": str(box1.pos1[0] if box1.pos1[0] <= box2.pos1[0] else box1.pos2[0]),
+                "y": str(box1.pos1[1] + box1.size()[1] * 2 // 3),
+                "font-size": str(box1.size()[1] // 2),
+                "text-anchor": "end" if box1.pos1[0] <= box2.pos1[0] else "start",
+            })
+            text.text = str(i)
+
+            rect = ET.SubElement(group, 'rect', attrib={
+                "class": "show-hover",
+                "x": str(box2.pos1[0]), "y": str(box2.pos1[1]),
+                "width": str(box2.size()[0]), "height": str(box2.size()[1]),
+                "stroke": 'black', "fill": 'transparent',
+                "stroke-width": str(int(box2.size().mean()) // 10),
+            })
+            text = ET.SubElement(group, 'text', attrib={
+                "class": "show-hover",
+                "x": str(box2.pos2[0] if box1.pos1[0] <= box2.pos1[0] else box2.pos1[0]),
+                "y": str(box2.pos1[1] + box2.size()[1] * 2 // 3),
+                "font-size": str(box2.size()[1] // 2),
+                "text-anchor": "start" if box1.pos1[0] <= box2.pos1[0] else "end",
+            })
+            text.text = str(j)
+            #"""
+
+        with open(path, 'wb') as ofile:
+            ET.ElementTree(html).write(ofile, encoding='utf-8', method='html')
 
 
     def score_heatmap(self, path, score_func=None):
@@ -1190,8 +1508,8 @@ class CompositeImage:
         return np.sqrt(diff[0]*diff[0] + diff[1]*diff[1])
 
 
-def align_job(aligner, image1, image2, shape1=None, shape2=None, precalc1=None, precalc2=None):
-    return aligner.align(image1=image1, image2=image2, shape1=shape1, shape2=shape2, precalc1=precalc1, precalc2=precalc2)
+def align_job(aligner, image1, image2, shape1=None, shape2=None, precalc1=None, precalc2=None, previous_constraint=None):
+    return aligner.align(image1=image1, image2=image2, shape1=shape1, shape2=shape2, precalc1=precalc1, precalc2=precalc2, previous_constraint=previous_constraint)
 
 def precalc_job(aligner, image, shape=None):
     return aligner.precalculate(image, shape=shape)

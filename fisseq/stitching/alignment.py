@@ -1,4 +1,5 @@
 import time
+import sys
 import numpy as np
 import skimage.io
 import itertools
@@ -21,14 +22,18 @@ class Aligner:
         """
         pass
 
-    def align(self, image1, image2, shape1=None, shape2=None, precalc1=None, precalc2=None):
+    def align(self, image1, image2, shape1=None, shape2=None, precalc1=None, precalc2=None, constraint=None):
         """ Performs the alignment of two images, finding the pixel offset that best aligns the
         two images. The offset should be from image1 to image2. The return value should be a Constraint
         object, with at least the dx, dy fields filled in to represent the offset of image2 needed
-        to align the two images. If the function finds images don't overlap, None should be returned.
+        to align the two images. If the function finds the images don't overlap, None should be returned.
+        If a constraint is specified, this method should only return a constraint that fits within the error
+        of given constraint, meaning within constraint.error pixels from the (constraint.dx, constraint.dy)
+        offset.
         """
         pass
 
+    # Helper functions for subclasses:
     def resize_if_needed(self, image, shape=None, downscale_factor=None):
         if shape is not None and image.shape != tuple(shape):
             image = skimage.transform.resize(image, shape)
@@ -44,36 +49,73 @@ class Aligner:
         return precalc1, precalc2
 
 
-class FFTAligner:
-    def __init__(self, num_peaks=2, downscale_factor=None):
+class FFTAligner(Aligner):
+    """ An aligner that uses the phase cross correlation algorithm to estimate the proper alignment of two images.
+    The algorithm is the same as described in Kuglin, Charles D. "The phase correlation image alignment method."
+    http://boutigny.free.fr/Astronomie/AstroSources/Kuglin-Hines.pdf
+    """
+    def __init__(self, num_peaks=2, precalculate_fft=True, downscale_factor=None):
+        """
+            num_peaks: int default 2
+                Sets the number of peaks in the resulting phase cross correlation image to be checked. Sometimes the highest
+                peak is not actually the best offset for alignment so checking multiple peaks can help find the one that
+                has the highest ncc score. Increasing this will also increase processing time, possibly dramatically.
+            precalculate_fft: bool default True
+                Whether or not the FFT of the images should be precalculated and cached or be calculated every time.
+                The FFT is able to be precalculated however it does take up a large amount of memory, so if memory
+                is a limiting factor setting this to False can help
+            downscale_factor: int, optional
+                This algorithm is rather slow when calculating large numbers of constraints, and one way to improve
+                speed is by downscaling the images before running the algorithm. This will improve runtime at the expense
+                of precision, the constraints calculated will have a nonzero error value. Also, if the downscale factor
+                is large enough the algorithm can begin to fail and not find any overlap, in general the largest recommended
+                value is around 32, but it depends on how large the features in your images are.
+        """
         self.num_peaks = num_peaks
+        self.precalculate_fft = precalculate_fft
         self.downscale_factor = downscale_factor
 
     def precalculate(self, image, shape=None):
-        image = self.resize_if_needed(image, shape, self.downscale_factor)
-        fft = np.fft.fft2(image)
+        #print (image.shape, file=sys.stderr)
+        image = self.resize_if_needed(image, shape, downscale_factor=self.downscale_factor)
+        fft = None if not self.precalculate_fft else np.fft.fft2(image)
         return image, fft
 
     def align(self, image1, image2, shape1=None, shape2=None, precalc1=None, precalc2=None, previous_constraint=None):
         if precalc1 is None:
-            precalc1 = self.precalculate(image1, shape1)
+            image1 = self.resize_if_needed(image1, shape1, downscale_factor=self.downscale_factor)
         else:
-            precalc1[1] = precalc1[1].copy() #fft1 is used for inplace computation to save mem
-        if precalc2 is None:
-            precalc2 = self.precalculate(image2, shape2)
+            image1 = precalc1[0]
 
-        image1, fft1 = precalc1
-        image2, fft2 = precalc2
+        if precalc2 is None:
+            image2 = self.resize_if_needed(image2, shape2, downscale_factor=self.downscale_factor)
+        else:
+            image2 = precalc2[0]
 
         orig_image1, orig_image2 = image1, image2
+            
         if image1.shape != image2.shape:
             image1, image2 = image_diff_sizes(image1, image2)
+
+        if image1.shape != orig_image1.shape or precalc1 is None or precalc1[1] is None: #precalc[1] would be none if precalculate_fft is false
+            fft1 = np.fft.fft2(image1)
+        else:
+            fft1 = precalc1[1].copy() # fft1 is used for in place computation to save mem
+
+        if image2.shape != orig_image2.shape or precalc2 is None or precalc2[1] is None:
+            fft2 = np.fft.fft2(image2)
+        else:
+            fft2 = precalc2[1]
 
         fft = calc_pcm(fft1.reshape(-1), fft2.reshape(-1)).reshape(fft1.shape)
         fft = np.fft.ifft2(fft).real
 
-        score, dx, dy = find_peaks(fft, orig_image1, orig_image2, num_peaks)
-        constraint = Constraint(score, dx, dy)
+        if previous_constraint is not None:
+            score, dx, dy = find_peaks_estimate(fft, orig_image1, orig_image2, self.num_peaks,
+                    estimate=(previous_constraint.dx, previous_constraint.dy), search_range=previous_constraint.error)
+        else:
+            score, dx, dy = find_peaks(fft, orig_image1, orig_image2, self.num_peaks)
+        constraint = Constraint(dx=dx, dy=dy, score=score)
 
         if self.downscale_factor:
             constraint.dx *= self.downscale_factor
@@ -83,15 +125,19 @@ class FFTAligner:
         return constraint
 
 
-class FeatureAligner:
+class FeatureAligner(Aligner):
     def __init__(self, num_features=2000):
         self.num_features = num_features
 
-    def precalculate(self, image):
+    def precalculate(self, image, shape=None):
         image = (image / np.percentile(image, 99.9) * 255).astype(np.uint8)
         detector = cv.SIFT_create(nfeatures=self.num_features)
         
         keypoints, features = detector.detectAndCompute(image1, None)
+
+        if shape is not None and image.shape != tuple(shape):
+            keypoints[:,0] *= shape[0] / image.shape[0]
+            keypoints[:,1] *= shape[1] / image.shape[1]
 
         return keypoints, features
 
@@ -361,6 +407,38 @@ def find_peaks(fft, image1, image2, num_peaks):
             for yval in (yval, shape[1] - yval):
                 for xval in (xval, -xval):
                     for yval in (yval, -yval):
+                        section1 = image1[max(0,xval):,max(0,yval):]
+                        section2 = image2[max(0,-xval):,max(0,-yval):]
+                        dim1 = min(section1.shape[0], section2.shape[0])
+                        dim2 = min(section1.shape[1], section2.shape[1])
+                        section1 = section1[:dim1,:dim2]
+                        section2 = section2[:dim1,:dim2]
+                        if section1.size == 0: continue
+
+                        peak = (ncc_fast(section1, section2), xval, yval)
+
+                        if peak[0] > best_peak[0]:
+                            best_peak = peak
+
+                if xval < shape[0] and yval < shape[1]:
+                    fft[xval,yval] = 0
+
+    return best_peak
+
+@numba.jit(nopython=True)
+def find_peaks_estimate(fft, image1, image2, num_peaks, estimate, search_range):
+    best_peak = (0,0,0)
+    shape = (max(image1.shape[0], image2.shape[0]), max(image1.shape[1], image2.shape[1]))
+    for i in range(num_peaks):
+        peak_index = np.argmax(fft, axis=None)
+        xval, yval = peak_index // fft.shape[1], peak_index % fft.shape[1]
+        for xval in (xval, shape[0] - xval):
+            for yval in (yval, shape[1] - yval):
+                for xval in (xval, -xval):
+                    for yval in (yval, -yval):
+                        if max(abs(estimate[0] - xval), abs(estimate[1] - yval)) > search_range:
+                            continue
+
                         section1 = image1[max(0,xval):,max(0,yval):]
                         section2 = image2[max(0,-xval):,max(0,-yval):]
                         dim1 = min(section1.shape[0], section2.shape[0])
