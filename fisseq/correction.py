@@ -1,3 +1,4 @@
+import sys
 import numpy as np
 import skimage.morphology
 import skimage.filters
@@ -146,26 +147,31 @@ def calculate_dye_matrix(excitation_wavelengths, dyes, filter_wavelengths):
     return None
 
 
-def estimate_background(images, percent=5, gaussian=50):
+def estimate_background(images, percent=5, gaussian=8):
     #background = np.percentile(images, 5, axis=0)
     old_shape = images.shape
-    #images = images.reshape(images.shape[0], -1)
-    background = np.zeros(images.shape[2:], images.dtype)
+    images = images.reshape(images.shape[0], -1)
+    background = np.zeros(images.shape[1], images.dtype)
+    print (images.shape, background.shape, file=sys.stderr)
 
     #split up work to avoid casting whole thing to float, keep memory down
     batch_size = images.shape[1] // 64
     for i in range(0, images.shape[1], batch_size):
         section = images[:,i:i+batch_size]
-        section = np.percentile(section, percent, axis=(0,1))
+        section = np.percentile(section, percent, axis=0)
         #section = section.mean(axis=0)
         background[i:i+batch_size] = section
 
-    background = background / background.max()
     background = background.reshape(old_shape[1:])
+    #skimage.io.imsave('tmp_background_0.tif', background)
+    background = background / np.array([layer.max() for layer in background]).reshape((-1,) + (1,) * (len(old_shape) - 2))
+    #skimage.io.imsave('tmp_background_1.tif', background)
     #mask = skimage.morphology.disk(8)
     for i in range(len(background)):
         #background[i] = skimage.morphology.erosion(background[i], mask)
-        background[i] = skimage.filters.gaussian(background[i], gaussian, mode='reflect')
+        background[i] = skimage.filters.gaussian(background[i], gaussian)
+    #skimage.io.imsave('tmp_background_2.tif', background)
+    #skdfl
     return background
 
 def illumination_correction(images, out=None, background=None):
