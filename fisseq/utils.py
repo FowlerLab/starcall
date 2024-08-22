@@ -65,14 +65,71 @@ def log_env(debug, progress):
 
     return debug, progress
 
+def to_rgb8(image, percent_norm=0.1, colormap=None):
+    image = standardize_format(image, 3)
+    num_channels, width, height = image.shape
+
+    print (image.min(), image.max())
+    minvals = np.percentile(image, percent_norm, axis=(1,2)).reshape(-1,1,1).astype(np.float32)
+    maxvals = np.percentile(image, 100 - percent_norm, axis=(1,2)).reshape(-1,1,1).astype(np.float32)
+    print (minvals, maxvals)
+    image = (image - minvals) / np.maximum(maxvals - minvals, np.finfo(np.float32).tiny)
+    print (image.min(), image.max())
+    
+    if colormap is None:
+        if num_channels == 1:
+            colormap = np.array([[1],[1],[1]])
+        if num_channels >= 2:
+            colormap = np.array([
+                [1, 0],
+                [0, 1],
+                [0, 0]])
+        if num_channels == 3:
+            colormap = np.array([
+                [1, 0, 0],
+                [0, 1, 0],
+                [0, 0, 1]])
+        if num_channels == 4:
+            colormap = np.array([
+                [0.66, 0, 0, 0.33],
+                [0, 0.66, 0, 0.33],
+                [0, 0, 1, 0]])
+        if num_channels == 5:
+            colormap = np.array([
+                [0.5, 0, 0, 0.25, 0.25],
+                [0, 0.5, 0, 0.25, 0],
+                [0, 0, 0.5, 0, 0.25]])
+        if num_channels == 6:
+            colormap = np.array([
+                [0.5, 0, 0, 0.25, 0.25, 0],
+                [0, 0.5, 0, 0.25, 0, 0.25],
+                [0, 0, 0.5, 0, 0.25, 0.25]])
+        if num_channels == 7:
+            colormap = np.array([
+                [0.43, 0, 0, 0.21, 0.21, 0, 0.14],
+                [0, 0.43, 0, 0.21, 0, 0.21, 0.14],
+                [0, 0, 0.43, 0, 0.21, 0.21, 0.14]])
+
+    print (colormap)
+
+    flatimage = image.reshape(num_channels, -1)
+    newimage = np.matmul(colormap, flatimage).T
+    image = newimage.reshape(width, height, 3)
+
+    print (image.min(), image.max())
+    
+    image[image<0] = 0
+    image[image>1] = 1
+    image = (image * 255).astype('uint8')
+    
+    return image
+
 
 def standardize_format(image, expected_dims):
     """ Converts an input image into the format
     expected, this being:
     (width, height), (channels, width, height), (cycle, channels, width, height)
     depending on the expected_dims. """
-
-    image = image.squeeze()
 
     if len(image.shape) == 3:
         if expected_dims < 3:
@@ -86,7 +143,7 @@ def standardize_format(image, expected_dims):
         if image.shape[2] < 32:
             image = image.transpose((0,3,1,2))
     
-    return image.reshape([1] * (expected_dims - len(image.shape)) + image.shape)
+    return image.reshape((1,) * (expected_dims - len(image.shape)) + image.shape)
 
 def percent_normalize(image, percent=0.1):
     if len(image.shape) == 2:
@@ -101,12 +158,14 @@ def percent_normalize(image, percent=0.1):
 
     return image
 
+"""
 def to_rgb8(image):
     if image.dtype != np.uint8:
         image = percent_normalize(image).astype(np.uint8)
 
     image = image.transpose((1,2,0))
     return image[:,:,:3]
+"""
 
 def mark_dots(image, poses):
     marking_layer = np.zeros_like(image[0])
