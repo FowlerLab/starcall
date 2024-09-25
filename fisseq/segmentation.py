@@ -1,3 +1,5 @@
+import collections
+import skimage.measure
 import skimage.io
 import numpy as np
 import skimage.feature
@@ -69,4 +71,41 @@ def image_log_scale(data, bottom_percentile=10, floor_threshold=50, ignore_zero=
     floor = np.log10(floor_threshold)
     scaled[scaled < floor] = floor
     return scaled - floor
+
+def match_segmentations(cells, nuclei):
+    cell_props = skimage.measure.regionprops(cells)
+    nuclei_props = skimage.measure.regionprops(nuclei)
+    mapping = {}
+
+    cell_props = {prop.label: prop for prop in cell_props}
+    nuclei_props = {prop.label: prop for prop in nuclei_props}
+    
+    for nuclei_obj in utils.simple_progress(nuclei_props.values()):
+        possible_cells = cells[nuclei_obj.coords[:,0],nuclei_obj.coords[:,1]]
+        counts = collections.Counter(possible_cells[possible_cells!=0]).most_common(1)
+        if len(counts) == 0:
+            continue
+        cell_label = counts[0][0]
+        score = counts[0][1] / len(possible_cells) + counts[0][1] / cell_props[cell_label].area
+        mapping.setdefault(cell_label, []).append((score, nuclei_obj.label))
+
+    #cells[...] = 0
+    #nuclei[...] = 0
+    new_cells = np.zeros(cells.shape, cells.dtype)
+    new_nuclei = np.zeros(nuclei.shape, nuclei.dtype)
+    scores = []
+    #new_image = np.zeros((2, *cells.shape), cells.dtype)
+    for i, cell_label in enumerate(mapping):
+        cell = cell_props[cell_label]
+        nuclei_scores = sorted(mapping[cell_label])
+        nuclei_label = nuclei_scores[-1][1]
+        nucleus = nuclei_props[nuclei_label]
+        new_cells[cell.coords[:,0],cell.coords[:,1]] = i + 1
+        new_nuclei[nucleus.coords[:,0],nucleus.coords[:,1]] = i + 1
+        scores.append(nuclei_scores[0][0])
+
+    #scores = np.array(scores)
+    #np.save('tmp_scores.npy', scores)
+
+    return new_cells, new_nuclei
 
