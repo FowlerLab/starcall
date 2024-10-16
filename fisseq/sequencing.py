@@ -1,12 +1,90 @@
 import math
 import numpy as np
+import sklearn.cluster
+import dataclasses
 from . import utils
 
 import time
 
+
 class BarcodeLibrary:
-    def __init__(self, barcodes):
-        pass
+    def __init__(self, barcodes, distance_function=None, batch_size=50):
+        barcodes = np.asarray(barcodes)
+        if barcodes.dtype.type is np.str_:
+            barcodes = pack_barcodes(barcodes)
+        if barcodes.ndim == 1:
+            barcodes = barcodes.reshape(-1, 1)
+
+        self.barcodes = barcodes
+        self.distance_function = distance_function or calc_barcode_distances
+
+        def dist_func(index1, index2):
+            if index1 < 0:
+                barc1 = self.current_reads[-int(index1)-1]
+            else:
+                barc1 = self.barcodes[int(index1)]
+
+            if index2 < 0:
+                barc2 = self.current_reads[-int(index2)-1]
+            else:
+                barc2 = self.barcodes[int(index2)]
+
+            return self.distance_function(barc1, barc2)
+
+        self.neighbors = sklearn.neighbors.NearestNeighbors(n_neighbors=2, metric=dist_func)
+        self.neighbors = self.neighbors.fit(np.arange(len(self.barcodes)).reshape(-1, 1))
+
+        """
+        def split(dists):
+
+        barcodes = self.barcodes
+        dists = self.barcode_dists
+        tree = []
+        while len(barcodes) / batch_size > batch_size / 2:
+            n_clusters = len(barcodes) // batch_size
+            clusters = sklearn.cluster.AgglomerativeClustering(n_clusters=n_clusters, linkage='average', metric='precomputed').fit_predict(dists)
+            centers = np.empty(n_clusters, dtype=int)
+
+            for i in range(n_clusters):
+                mask = 
+                indices = np.argwhere(clusters == i).flatten()
+                sub_dists = dists[indices,indices]
+                centers[i] = indices[np.argmin(dists.sum(axis=1))]
+
+            new_clusters = dists[:,centers].argmin(axis=1)
+            center_barcodes = barcodes[centers]
+
+            cluster_barcodes = []
+            cluster_indices = []
+            for i in range(n_clusters):
+                indices = np.argwhere(new_clusters == i).flatten()
+                cluster_barcodes.append(barcodes[indices])
+                cluster_indices.append(indices)
+            tree.append((cluster_barcodes, cluster_indices))
+
+            barcodes = center_barcodes
+            dists = dists[centers,centers]
+
+        tree.append(([barcodes], np.arange(len(barcodes))))
+        self.tree = tree[::-1]
+        #"""
+
+    def closest(self, reads, match_threshold=2, second_threshold=None):
+        second_threshold = second_threshold or match_threshold
+        reads = np.asarray(reads)
+        if reads.dtype.type is np.str_:
+            reads = pack_barcodes(reads)
+        if reads.ndim == 1:
+            reads = reads.reshape(-1, 1)
+
+        self.current_reads = reads
+        dists, indices = self.neighbors.kneighbors(-np.arange(len(reads)).reshape(-1, 1) - 1)
+        matches = dists <= match_threshold
+        true_matches = matches[:,0] & ~matches[:,1]
+        indices = indices[:,0]
+        indices[~true_matches] = -1
+
+        return indices
 
 
 def calc_barcode_distances(reads, library, counts=None, max_edit_distance=None, read_mask=None, dtype=np.float32, reads_needed=None):
@@ -21,7 +99,7 @@ def calc_barcode_distances(reads, library, counts=None, max_edit_distance=None, 
         reads = np.asarray(reads)
 
     library = np.asarray(library)
-    print (reads, library)
+    #print (reads, library)
 
     if counts is not None:
         counts = np.asarray(counts)
@@ -31,11 +109,6 @@ def calc_barcode_distances(reads, library, counts=None, max_edit_distance=None, 
         reads = pack_barcodes(reads)
     if library.dtype.type is np.str_:
         library = pack_barcodes(library)
-
-    reads_needed = reads_needed or library.shape[1]
-
-    print (reads, library)
-    print (read_mask)
 
     if library.ndim == 1:
         library = library.reshape(-1, 1)
@@ -47,14 +120,14 @@ def calc_barcode_distances(reads, library, counts=None, max_edit_distance=None, 
     if counts is not None:
         counts = counts.reshape(reads.shape)
     
+    reads_needed = reads_needed or library.shape[1]
+
     #reads = reads[counts!=0]
     #counts = counts[counts!=0]
     #if reads.size == 0: continue
 
     reads = np.broadcast_to(reads.reshape(reads.shape + (1,1)), reads.shape + library.shape)
     library = np.broadcast_to(library.reshape((1,1) + library.shape), reads.shape)
-
-    print (reads.shape, library.shape)
 
     distances = np.zeros(reads.shape, dtype=dtype)
     if max_edit_distance == 0:
@@ -68,13 +141,12 @@ def calc_barcode_distances(reads, library, counts=None, max_edit_distance=None, 
     if read_mask is not None:
         distances[~read_mask] = np.inf
 
-    if distances.shape[1] > 1 or distances.shape[3] > 1:
-        if reads_needed == 1:
-            distances = np.min(distances, axis=(1,3))
-        else:
-            distances = np.min(distances, axis=3)
-            distances.partition(reads_needed - 1, axis=1)
-            distances = distances[:,reads_needed-1]
+    if reads_needed == 1:
+        distances = np.min(distances, axis=(1,3))
+    else:
+        distances = np.min(distances, axis=3)
+        distances.partition(reads_needed - 1, axis=1)
+        distances = distances[:,reads_needed-1]
 
     return distances
 
