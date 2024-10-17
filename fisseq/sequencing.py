@@ -1,12 +1,113 @@
 import math
 import numpy as np
+import sklearn.cluster
+import dataclasses
 from . import utils
 
 import time
 
+def euclidean_distance(poses1, poses2):
+    poses1, poses2 = np.asarray(poses1), np.asarray(poses2)
+    assert poses1.shape[1] == poses2.shape[1]
+    poses2 = np.broadcast_to(poses2.reshape((1,) + poses2.shape), (poses1.shape[0],) + poses2.shape)
+    poses1 = np.broadcast_to(poses1.reshape(poses1.shape[0], 1, poses1.shape[1]), poses2.shape)
+    distances = poses1 - poses2
+    del poses1, poses2
+    distances = np.linalg.norm(distances, axis=2)
+    return distances.T
+
+class TreeNode:
+    def __init__(self, points, indices):
+        self.points = points
+        self.indices = indices
+
+class NearestNeighbors:
+    def __init__(self, n_neighbors=5, metric='euclidean'):
+        if metric == 'euclidean':
+            metric = euclidean_distance
+        self.distance_function = metric
+
+    def fit(self, X, y=None):
+        points = X
+        self.distance_matrix = self.distance_function(points, points)
+        batch_size = 4
+
+        self.points = points
+        self.tree = []
+
+        all_points, all_dists, all_indices = [self.points], [self.distance_matrix], [np.arange(len(self.points))]
+
+        self.tree = []
+        while max(map(len, all_points)) / batch_size > batch_size / 2:
+            new_points, new_dists, new_indices = [], [], []
+            new_layer = []
+
+            for points, dists, indices in zip(all_points, all_dists, all_indices):
+                clusters = sklearn.cluster.AgglomerativeClustering(n_clusters=batch_size, linkage='average', metric='precomputed').fit_predict(dists)
+
+                centers = []
+                indices = []
+                for cluster in range(clusters.max() + 1):
+                    mask = clusters == cluster
+                    indices.append(len(new_points))
+                    new_points.append(points[mask])
+                    new_dists.append(dists[mask,mask])
+                    new_indices(indices[mask])
+                    center = np.argmin(new_dists[-1].sum(axis=1))
+                    centers.append(np.arange(len(points))[mask][center])
+
+                new_layer.append(TreeNode(points[centers], np.array(indices)))
+
+            self.tree.append(new_layer)
+
+        last_layer = []
+        for points, indices in zip(new_points, new_indices):
+            last_layer.append(TreeNode(points, indices))
+        self.tree.append(last_layer)
+
+    def closest(read):
+        index = 0
+        for layer in self.tree:
+            node = layer[index]
+            dists = self.distance_function(node.points, read)
+            index = node.indices[np.argmin(dists.flatten())]
+        
+        return index
+
+
 class BarcodeLibrary:
-    def __init__(self, barcodes):
-        pass
+    def __init__(self, barcodes, distance_function=None, batch_size=50):
+        barcodes = np.asarray(barcodes)
+        #if barcodes.dtype.type is np.str_:
+            #barcodes = pack_barcodes(barcodes)
+        if barcodes.ndim == 1:
+            barcodes = barcodes.reshape(-1, 1)
+
+        self.barcodes = barcodes_to_vector(barcodes)
+
+        self.neighbors = sklearn.neighbors.NearestNeighbors(n_neighbors=2, metric='manhattan')
+        self.neighbors = self.neighbors.fit(self.barcodes)
+
+    def closest(self, reads, match_threshold=2, second_threshold=None):
+        second_threshold = second_threshold or match_threshold
+        reads = np.asarray(reads)
+        #if reads.dtype.type is np.str_:
+            #reads = pack_barcodes(reads)
+        if reads.ndim == 1:
+            reads = reads.reshape(-1, 1)
+
+        reads = barcodes_to_vector(reads)
+        print (reads)
+        print (self.barcodes)
+        dists, indices = self.neighbors.kneighbors(reads)
+        print (dists)
+        dists /= 2
+        matches = dists <= match_threshold
+        true_matches = matches[:,0] & ~matches[:,1]
+        indices = indices[:,0]
+        indices[~true_matches] = -1
+
+        return indices
 
 
 def calc_barcode_distances(reads, library, counts=None, max_edit_distance=None, read_mask=None, dtype=np.float32, reads_needed=None):
@@ -21,7 +122,7 @@ def calc_barcode_distances(reads, library, counts=None, max_edit_distance=None, 
         reads = np.asarray(reads)
 
     library = np.asarray(library)
-    print (reads, library)
+    #print (reads, library)
 
     if counts is not None:
         counts = np.asarray(counts)
@@ -31,11 +132,6 @@ def calc_barcode_distances(reads, library, counts=None, max_edit_distance=None, 
         reads = pack_barcodes(reads)
     if library.dtype.type is np.str_:
         library = pack_barcodes(library)
-
-    reads_needed = reads_needed or library.shape[1]
-
-    print (reads, library)
-    print (read_mask)
 
     if library.ndim == 1:
         library = library.reshape(-1, 1)
@@ -47,14 +143,14 @@ def calc_barcode_distances(reads, library, counts=None, max_edit_distance=None, 
     if counts is not None:
         counts = counts.reshape(reads.shape)
     
+    reads_needed = reads_needed or library.shape[1]
+
     #reads = reads[counts!=0]
     #counts = counts[counts!=0]
     #if reads.size == 0: continue
 
     reads = np.broadcast_to(reads.reshape(reads.shape + (1,1)), reads.shape + library.shape)
     library = np.broadcast_to(library.reshape((1,1) + library.shape), reads.shape)
-
-    print (reads.shape, library.shape)
 
     distances = np.zeros(reads.shape, dtype=dtype)
     if max_edit_distance == 0:
@@ -68,13 +164,12 @@ def calc_barcode_distances(reads, library, counts=None, max_edit_distance=None, 
     if read_mask is not None:
         distances[~read_mask] = np.inf
 
-    if distances.shape[1] > 1 or distances.shape[3] > 1:
-        if reads_needed == 1:
-            distances = np.min(distances, axis=(1,3))
-        else:
-            distances = np.min(distances, axis=3)
-            distances.partition(reads_needed - 1, axis=1)
-            distances = distances[:,reads_needed-1]
+    if reads_needed == 1:
+        distances = np.min(distances, axis=(1,3))
+    else:
+        distances = np.min(distances, axis=3)
+        distances.partition(reads_needed - 1, axis=1)
+        distances = distances[:,reads_needed-1]
 
     return distances
 
@@ -100,42 +195,20 @@ def match_barcodes(reads, counts, library, max_edit_distance=0, debug=True, prog
 
     matched_indices = np.full(reads.shape[0], -1, dtype=int)
     for i in progress(range(reads.shape[0])):
-        #"""
         read_set = reads[i]
         count_set = counts[i]
         read_set = read_set[count_set!=0]
         count_set = count_set[count_set!=0]
         if read_set.size == 0: continue
 
-        read_set = np.broadcast_to(read_set.reshape(1,1,-1), library.shape + (len(read_set),))
-        assert read_set.shape[:2] == library.shape
-        library_set = np.broadcast_to(library.reshape(library.shape + (1,)), read_set.shape)
+        print (read_set)
+        dists = calc_barcode_distances(read_set, library).reshape(-1)
+        print (dists)
+        indices = np.argpartition(dists, 1)
+        print (indices)
 
-        distances = np.zeros(read_set.shape, dtype=np.float32)
-        if max_edit_distance == 0:
-            np.not_equal(read_set, library_set, out=distances)
-        else:
-            edit_distance(read_set, library_set, out=distances)
-        distances += 1 / (count_set.reshape(1,1,-1) + 1) # ties are broken by read count
-
-        #distances = distances.min(axis=2).max(axis=1)
-        np.min(distances, axis=2, out=distances[:,:,0])
-        np.max(distances[:,:,0], axis=1, out=distances[:,0,0])
-        distances = distances[:,0,0]
-        #"""
-        #distances = calc_barcode_distances(reads[i], counts[i], library)
-
-        library_index = np.argmin(distances)
-
-        min_val = distances[library_index]
-        distances[library_index] = np.inf
-        next_min_val = distances.min()
-        del distances
-
-        if min_val == next_min_val or min_val >= max_edit_distance + 1:
-            continue
-
-        matched_indices[i] = library_index
+        if dists[indices[0]] <= max_edit_distance and dists[indices[1]] > max_edit_distance:
+            matched_indices[i] = indices[0]
 
     return matched_indices
 
@@ -228,6 +301,7 @@ def barcodes_to_vector(barcodes):
     barcodes = np.asarray(barcodes)
 
     orig_shape = barcodes.shape
+    barcodes = barcodes.reshape(-1)
     barcodes = np.frombuffer(barcodes, dtype=np.array(barcodes[0][0]).dtype).reshape(barcodes.shape[0], -1)
 
     vecs = np.zeros((barcodes.shape[0], barcodes.shape[1] * 2), dtype=np.float32)
