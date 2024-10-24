@@ -168,12 +168,73 @@ def calc_barcode_distances(reads, library, counts=None, max_edit_distance=None, 
         distances = np.min(distances, axis=(1,3))
     else:
         distances = np.min(distances, axis=3)
+        print (distances.shape)
         distances.partition(reads_needed - 1, axis=1)
         distances = distances[:,reads_needed-1]
 
     return distances
 
 def match_barcodes(reads, counts, library, max_edit_distance=0, debug=True, progress=False):
+    """ Matches each set of reads given with a library barcode or set of barcodes.
+    If max_edit_distance is nonzero, it will also try to match barcodes that differ
+    in less that or equal to that many bases.
+    """
+    
+    debug, progress = utils.log_env(debug, progress)
+    reads, counts, library = np.asarray(reads), np.asarray(counts), np.asarray(library)
+    if reads.dtype.type is np.str_:
+        reads = pack_barcodes(reads)
+    if library.dtype.type is np.str_:
+        library = pack_barcodes(library)
+    if len(reads.shape) == 1:
+        reads = reads.reshape(-1, 1)
+    if len(library.shape) == 1:
+        library = library.reshape(-1, 1)
+
+    matched_indices = np.full(reads.shape[0], -1, dtype=int)
+    reads_needed = library.shape[1]
+
+    for i in progress(range(reads.shape[0])):
+        #"""
+        read_set = reads[i]
+        count_set = counts[i]
+        read_set = read_set[count_set!=0]
+        count_set = count_set[count_set!=0]
+        if read_set.size < reads_needed: continue
+
+        read_set = np.broadcast_to(read_set.reshape(1,1,-1), library.shape + (len(read_set),))
+        assert read_set.shape[:2] == library.shape
+        library_set = np.broadcast_to(library.reshape(library.shape + (1,)), read_set.shape)
+        distances = np.zeros(read_set.shape, dtype=np.float32)
+
+        if max_edit_distance == 0:
+            np.not_equal(read_set, library_set, out=distances)
+        else:
+            edit_distance(read_set, library_set, out=distances)
+
+        distances += 1 / (count_set.reshape(1,1,-1) + 1) # ties are broken by read count
+        #distances = distances.min(axis=2).max(axis=1)
+        #np.min(distances, axis=2, out=distances[:,:,0])
+        #np.max(distances[:,:,0], axis=1, out=distances[:,0,0])
+
+        distances = np.min(distances, axis=2)
+        distances.partition(reads_needed - 1, axis=1)
+        distances = distances[:,reads_needed-1]
+
+        #distances = distances[:,0,0]
+        #"""
+        #distances = calc_barcode_distances(reads[i], counts[i], library)
+        library_index = np.argmin(distances)
+        min_val = distances[library_index]
+        distances[library_index] = np.inf
+        next_min_val = distances.min()
+        del distances
+        if min_val == next_min_val or min_val >= max_edit_distance + 1:
+            continue
+        matched_indices[i] = library_index
+    return matched_indices
+
+def match_barcodes_bad(reads, counts, library, max_edit_distance=0, debug=True, progress=False):
     """ Matches each set of reads given with a library barcode or set of barcodes.
     If max_edit_distance is nonzero, it will also try to match barcodes that differ
     in less that or equal to that many bases.
@@ -199,9 +260,11 @@ def match_barcodes(reads, counts, library, max_edit_distance=0, debug=True, prog
         count_set = counts[i]
         read_set = read_set[count_set!=0]
         count_set = count_set[count_set!=0]
-        if read_set.size == 0: continue
+        if read_set.size < library.shape[1]: continue
 
         print (read_set)
+        print (read_set.shape, library.shape)
+        print ('calciing distss')
         dists = calc_barcode_distances(read_set, library).reshape(-1)
         print (dists)
         indices = np.argpartition(dists, 1)
