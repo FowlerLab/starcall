@@ -78,17 +78,32 @@ class NearestNeighbors:
 class BarcodeLibrary:
     def __init__(self, barcodes, distance_function=None, batch_size=50):
         barcodes = np.asarray(barcodes)
-        #if barcodes.dtype.type is np.str_:
-            #barcodes = pack_barcodes(barcodes)
-        if barcodes.ndim == 1:
-            barcodes = barcodes.reshape(-1, 1)
-
-        self.barcodes = barcodes_to_vector(barcodes)
+        if barcodes.dtype.type is np.str_:
+            barcodes = barcodes_to_vector(barcodes)
+        if barcodes.ndim == 2:
+            barcodes = barcodes.reshape(barcodes.shape[0], -1)
 
         self.neighbors = sklearn.neighbors.NearestNeighbors(n_neighbors=2, metric='manhattan')
         self.neighbors = self.neighbors.fit(self.barcodes)
 
-    def closest(self, reads, match_threshold=2, second_threshold=None):
+    def permutations(num):
+        indices = np.zeros((math.factorial(num), num))
+        factor = 1
+        for subnum in range(2, num + 1):
+            subindices = indices[:factor,num-subnum+1:]
+            for i in range(1, subnum):
+                indices[i*factor:(i+1)*factor,num-subnum] = i
+                indices[i*factor:(i+1)*factor,num-subnum+1:] = subindices + (subindices >= i)
+            subindices += 1
+            factor *= subnum
+        return indices
+
+    def closest(self, reads, counts=None, match_threshold=2, second_threshold=None):
+        combined_reads = reads
+        if reads.ndims == 2:
+            if counts is None:
+                pass
+        
         second_threshold = second_threshold or match_threshold
         reads = np.asarray(reads)
         #if reads.dtype.type is np.str_:
@@ -174,7 +189,7 @@ def calc_barcode_distances(reads, library, counts=None, max_edit_distance=None, 
 
     return distances
 
-def match_barcodes(reads, counts, library, max_edit_distance=0, debug=True, progress=False):
+def match_barcodes(reads, counts, library, max_edit_distance=0, return_distances=False, debug=True, progress=False):
     """ Matches each set of reads given with a library barcode or set of barcodes.
     If max_edit_distance is nonzero, it will also try to match barcodes that differ
     in less that or equal to that many bases.
@@ -192,6 +207,7 @@ def match_barcodes(reads, counts, library, max_edit_distance=0, debug=True, prog
         library = library.reshape(-1, 1)
 
     matched_indices = np.full(reads.shape[0], -1, dtype=int)
+    all_distances = np.full(reads.shape[0], -1, dtype=int)
     reads_needed = library.shape[1]
 
     for i in progress(range(reads.shape[0])):
@@ -232,6 +248,10 @@ def match_barcodes(reads, counts, library, max_edit_distance=0, debug=True, prog
         if min_val == next_min_val or min_val >= max_edit_distance + 1:
             continue
         matched_indices[i] = library_index
+        all_distances[i] = int(min_val)
+
+    if return_distances:
+        return matched_indices, all_distances
     return matched_indices
 
 def match_barcodes_bad(reads, counts, library, max_edit_distance=0, debug=True, progress=False):
