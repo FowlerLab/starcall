@@ -87,7 +87,15 @@ class BarcodeLibrary:
         self.neighbors = sklearn.neighbors.NearestNeighbors(n_neighbors=2, metric='manhattan')
         self.neighbors = self.neighbors.fit(self.barcodes)
 
-    def permutations(self, num):
+    def permutations(self, max_val, num):
+        perms = np.arange(max_val).reshape(-1, 1)
+        for i in range(num-1):
+            new_vals = np.repeat(np.arange(max_val), len(perms)).reshape(-1, 1)
+            perms = np.tile(perms, (max_val, 1))
+            perms = np.concatenate([new_vals, perms], axis=1)
+        return perms
+
+        """
         indices = np.zeros((math.factorial(num), num), int)
         factor = 1
         for subnum in range(2, num + 1):
@@ -98,10 +106,11 @@ class BarcodeLibrary:
             subindices += 1
             factor *= subnum
         return indices
+        """
 
     def nearest(self, reads, counts=None, match_threshold=2, second_threshold=None):
         reads = barcodes_to_vector(reads)
-        counts = counts or np.ones(reads.shape[:-1])
+        counts = counts if counts is not None else np.ones(reads.shape[:-1])
         ranges = np.stack([np.arange(len(reads)), np.arange(1, len(reads) + 1)], axis=-1)
 
         if reads.ndim == 3:
@@ -111,7 +120,11 @@ class BarcodeLibrary:
                 read_set, count_set = read_set[count_set!=0], count_set[count_set!=0]
                 reads_needed = self.barcodes.shape[1] / read_set.shape[1]
                 assert int(reads_needed) == reads_needed
-                indices = self.permutations(len(read_set))[:,:int(reads_needed)]
+                if len(read_set) < int(reads_needed):
+                    ranges.append((len(combined_reads), len(combined_reads)))
+                    continue
+
+                indices = self.permutations(len(read_set), int(reads_needed))
 
                 new_reads = read_set[indices]
                 new_reads = new_reads.reshape(new_reads.shape[0], -1)
@@ -132,6 +145,8 @@ class BarcodeLibrary:
         match_dists = np.full(len(ranges), -1)
 
         for i, (begin, end) in enumerate(ranges):
+            if begin == end: continue
+
             dist_section, indices_section = dists[begin:end], indices[begin:end]
             dist_section[dist_section[:,0]==dist_section[:,1]] = np.inf
 
