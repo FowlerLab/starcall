@@ -464,7 +464,10 @@ def edit_distance(barcode1, barcode2, out=None):
 
 
 def cluster_reads(values):
-    model = sklearn.cluster.AgglomerativeClustering(distance_threshold=1)
+    if len(values) <= 1:
+        return values, np.array([1])
+
+    model = sklearn.cluster.AgglomerativeClustering(n_clusters=None, distance_threshold=1).fit(values.reshape(values.shape[0], -1))
     new_values = []
     counts = []
     for i in np.unique(model.labels_):
@@ -474,26 +477,32 @@ def cluster_reads(values):
     return np.array(new_values), np.array(counts)
 
 
+
+
 def call_reads(cells, poses, values, num_reads=8):
     assert values.shape[2] == 4
     
-    values /= values.sum(axis=2)
+    totals = values.sum(axis=2)
+    totals[totals==0] = 1
+    values /= totals.reshape(values.shape[:-1] + (1,))
 
     cell_reads = {}
 
     for pos, vals in zip(poses, values):
         cell = cells[pos[0],pos[1]]
-        cell_reads.setdefault(cell, []).append((pos, vals))
+        if cell == 0: continue
+        bases = ''.join('GTAC'[i] for i in np.argmax(vals, axis=1))
+        cell_reads.setdefault(cell, []).append((pos, bases, vals))
 
     merged_reads = {}
     for cell in cell_reads.keys():
-        cell_vals = np.array([pair[1] for pair in cell_reads[cell]])
+        cell_vals = np.array([pair[2] for pair in cell_reads[cell]])
         cell_vals, counts = cluster_reads(cell_vals)
 
         sorted_indices = np.argsort(counts)[::-1]
         cell_vals, counts = cell_vals[sorted_indices], counts[sorted_indices]
 
-        reads = np.array([''.join('GTAC'[i] for i in np.argmax(vals)) for vals in cell_vals])
+        reads = np.array([''.join('GTAC'[i] for i in np.argmax(vals, axis=1)) for vals in cell_vals])
         merged_reads[cell] = list(zip(reads, counts))
 
     return merged_reads, cell_reads
