@@ -460,3 +460,40 @@ def edit_distance(barcode1, barcode2, out=None):
     diff = barcode1 ^ barcode2
     dists = _edit_distance_table[np.frombuffer(diff, dtype=np.uint8)].reshape(diff.shape + (diff.dtype.itemsize,))
     return dists.sum(axis=-1, out=out)
+
+
+
+def cluster_reads(values):
+    model = sklearn.cluster.AgglomerativeClustering(distance_threshold=1)
+    new_values = []
+    counts = []
+    for i in np.unique(model.labels_):
+        new_vals = values[model.labels_==i].mean(axis=0)
+        new_values.append(new_vals)
+        counts.append(np.sum(model.labels_==i))
+    return np.array(new_values), np.array(counts)
+
+
+def call_reads(cells, poses, values, num_reads=8):
+    assert values.shape[2] == 4
+    
+    values /= values.sum(axis=2)
+
+    cell_reads = {}
+
+    for pos, vals in zip(poses, values):
+        cell = cells[pos[0],pos[1]]
+        cell_reads.setdefault(cell, []).append((pos, vals))
+
+    merged_reads = {}
+    for cell in cell_reads.keys():
+        cell_vals = np.array([pair[1] for pair in cell_reads[cell]])
+        cell_vals, counts = cluster_reads(cell_vals)
+
+        sorted_indices = np.argsort(counts)[::-1]
+        cell_vals, counts = cell_vals[sorted_indices], counts[sorted_indices]
+
+        reads = np.array([''.join('GTAC'[i] for i in np.argmax(vals)) for vals in cell_vals])
+        merged_reads[cell] = list(zip(reads, counts))
+
+    return merged_reads, cell_reads
