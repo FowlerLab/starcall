@@ -462,18 +462,84 @@ def edit_distance(barcode1, barcode2, out=None):
     return dists.sum(axis=-1, out=out)
 
 
+import matplotlib.pyplot as plt
 
 def cluster_reads(values):
-    if len(values) <= 1:
-        return values, np.array([1])
+    #reads = [''.join('GTAC'[j] for j in np.argmax(vals, axis=1)) for vals in values]
+    if True or len(values) <= 1:
+        return values, np.array([1] * len(values), dtype=int)
 
-    model = sklearn.cluster.AgglomerativeClustering(n_clusters=None, distance_threshold=1).fit(values.reshape(values.shape[0], -1))
+    broadcast_values = values.reshape(values.shape[0], 1, *values.shape[1:])
+    broadcast_values = np.broadcast_to(broadcast_values, (broadcast_values.shape[0], broadcast_values.shape[0], *broadcast_values.shape[2:]))
+    #prod = np.sum(broadcast_values * broadcast_values.transpose(1,0,2,3), axis=3)
+    #norm = np.linalg.norm(broadcast_values, axis=3)
+    #norm[norm==0] = 1
+    #distance_matrix = prod / (norm * norm.transpose(1,0,2))
+    #distance_matrix = 2 - distance_matrix
+    #distance_matrix = np.sum(distance_matrix, axis=2)
+    broadcast_values = broadcast_values.reshape(broadcast_values.shape[:2] + (-1,))
+    distance_matrix = np.linalg.norm(broadcast_values - broadcast_values.transpose(1,0,2), axis=2)
+    print (distance_matrix)
+    print (distance_matrix.shape)
+    print (np.sort(distance_matrix.flatten()))
+    fig, axes = plt.subplots(nrows=2, figsize=(8,11))
+    axes[0].imshow(distance_matrix)
+    axes[1].hist(distance_matrix.flatten(), bins=15)
+    fig.savefig('plots/read_clustersing_dists.png')
+
+    pairs, dists = [], []
+    for i in range(distance_matrix.shape[0]):
+        for j in range(i+1, distance_matrix.shape[1]):
+            pairs.append((i,j))
+            dists.append(distance_matrix[i,j])
+    pairs, dists = np.array(pairs), np.array(dists)
+    indices = np.argsort(dists)
+    pairs, dists = pairs[indices], dists[indices]
+
+    fig, axes = plt.subplots(nrows=len(pairs) + 1, ncols=4, figsize=(16, 6*len(pairs) + 6))
+    for i, pair, dist in zip(range(len(pairs)), pairs, dists):
+        vals1, vals2 = values[pair[0]], values[pair[1]]
+        for j in range(4):
+            axes[i+1,j].plot(list(range(len(vals1))), np.abs(vals1[:,j] - vals2[:,j]), ':')
+            axes[i+1,j].plot(list(range(len(vals1))), vals1[:,j], 'C' + str(pair[0]))
+            axes[i+1,j].plot(list(range(len(vals2))), vals2[:,j], 'C' + str(pair[1]))
+            axes[i+1,j].set_ylim(0, 1)
+        axes[i+1,0].set_title("Pair {} {} dist {}".format(pair[0], pair[1], dist))
+
+    for i, vals in enumerate(values):
+        for j in range(4):
+            axes[0,j].plot(list(range(len(vals))), vals[:,j], 'C' + str(i))
+
+    fig.savefig('plots/read_clustering_pairs.png')
+    #norm = np.linalg.norm(broadcast_values, axis=2)
+    #distance_matrix = np.sum(broadcast_values * broadcast_values.transpose(1,0,2), axis=2) / (norm * norm.T)
+    #model = sklearn.cluster.AgglomerativeClustering(n_clusters=None, distance_threshold=1, metric='precomputed', linkage='complete')
+    #model = model.fit(distance_matrix)
+    model = sklearn.cluster.AgglomerativeClustering(n_clusters=None, distance_threshold=1, linkage='complete').fit(values.reshape(values.shape[0], -1))
     new_values = []
     counts = []
+
     for i in np.unique(model.labels_):
         new_vals = values[model.labels_==i].mean(axis=0)
         new_values.append(new_vals)
         counts.append(np.sum(model.labels_==i))
+
+    if len(values) > 10:
+        all_labels = np.unique(model.labels_)
+        fig, axes = plt.subplots(nrows=len(all_labels), ncols=4, figsize=(18, 6 * len(all_labels)))
+
+        for i in all_labels:
+            for vals in values[model.labels_==i]:
+                print (i, ''.join('GTAC'[j] for j in np.argmax(vals, axis=1)))
+                for j in range(4):
+                    axes[i,j].plot(list(range(len(vals))), vals[:,j])
+            axes[i,0].set_title(''.join('GTAC'[j] for j in np.argmax(new_values[i], axis=1)))
+
+        fig.savefig('plots/read_clustering.png')
+        print (model.distances_.tolist())
+        print (model.distances_.min(), model.distances_.mean(), model.distances_.max())
+        ksdfl
+
     return np.array(new_values), np.array(counts)
 
 
