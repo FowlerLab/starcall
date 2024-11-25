@@ -80,14 +80,15 @@ class BarcodeLibrary:
         barcodes = np.asarray(barcodes)
         if barcodes.dtype.type is np.str_:
             barcodes = barcodes_to_vector(barcodes)
-        if barcodes.ndim == 2:
+        if barcodes.ndim == 3:
             barcodes = barcodes.reshape(barcodes.shape[0], -1)
+        self.barcodes = barcodes
 
         self.neighbors = sklearn.neighbors.NearestNeighbors(n_neighbors=2, metric='manhattan')
         self.neighbors = self.neighbors.fit(self.barcodes)
 
-    def permutations(num):
-        indices = np.zeros((math.factorial(num), num))
+    def permutations(self, num):
+        indices = np.zeros((math.factorial(num), num), int)
         factor = 1
         for subnum in range(2, num + 1):
             subindices = indices[:factor,num-subnum+1:]
@@ -98,31 +99,52 @@ class BarcodeLibrary:
             factor *= subnum
         return indices
 
-    def closest(self, reads, counts=None, match_threshold=2, second_threshold=None):
-        combined_reads = reads
-        if reads.ndims == 2:
-            if counts is None:
-                pass
-        
-        second_threshold = second_threshold or match_threshold
-        reads = np.asarray(reads)
-        #if reads.dtype.type is np.str_:
-            #reads = pack_barcodes(reads)
-        if reads.ndim == 1:
-            reads = reads.reshape(-1, 1)
-
+    def nearest(self, reads, counts=None, match_threshold=2, second_threshold=None):
         reads = barcodes_to_vector(reads)
-        print (reads)
-        print (self.barcodes)
-        dists, indices = self.neighbors.kneighbors(reads)
-        print (dists)
-        dists /= 2
-        matches = dists <= match_threshold
-        true_matches = matches[:,0] & ~matches[:,1]
-        indices = indices[:,0]
-        indices[~true_matches] = -1
+        counts = counts or np.ones(reads.shape[:-1])
+        ranges = np.stack([np.arange(len(reads)), np.arange(1, len(reads) + 1)], axis=-1)
 
-        return indices
+        if reads.ndim == 3:
+            combined_reads, combined_counts, ranges = [], [], []
+
+            for read_set, count_set in zip(reads, counts):
+                read_set, count_set = read_set[count_set!=0], count_set[count_set!=0]
+                reads_needed = self.barcodes.shape[1] / read_set.shape[1]
+                assert int(reads_needed) == reads_needed
+                indices = self.permutations(len(read_set))[:,:int(reads_needed)]
+
+                new_reads = read_set[indices]
+                new_reads = new_reads.reshape(new_reads.shape[0], -1)
+                new_counts = count_set[indices]
+
+                new_reads, unique_indices = np.unique(new_reads, axis=0, return_index=True)
+                new_counts = new_counts[unique_indices]
+                
+                ranges.append((len(combined_reads), len(combined_reads) + len(new_reads)))
+
+                combined_reads.extend(new_reads.reshape(new_reads.shape[0], -1))
+                combined_counts.extend(new_counts.min(axis=1))
+
+            reads, counts, ranges = np.array(combined_reads), np.array(combined_counts), np.array(ranges)
+
+        dists, indices = self.neighbors.kneighbors(reads)
+        matches = np.full(len(ranges), -1)
+        match_dists = np.full(len(ranges), -1)
+
+        for i, (begin, end) in enumerate(ranges):
+            dist_section, indices_section = dists[begin:end], indices[begin:end]
+            dist_section[dist_section[:,0]==dist_section[:,1]] = np.inf
+
+            min_index = np.argmin(dist_section[:,0])
+            min_val = dist_section[min_index,0]
+            dist_section[min_index,0] = np.inf
+
+            if dist_section[:,0].min() == min_val: continue
+
+            matches[i] = indices_section[min_index,0]
+            match_dists[i] = min_val / 2
+        
+        return match_dists, matches
 
 
 def calc_barcode_distances(reads, library, counts=None, max_edit_distance=None, read_mask=None, dtype=np.float32, reads_needed=None):
@@ -391,7 +413,7 @@ def barcodes_to_vector(barcodes):
     vecs[:,::2] = (barcodes == 'T').astype(np.float32) - (barcodes == 'G').astype(np.float32)
     vecs[:,1::2] = (barcodes == 'C').astype(np.float32) - (barcodes == 'A').astype(np.float32)
 
-    return vecs
+    return vecs.reshape(orig_shape + (-1,))
 
 def make_edit_distance_table():
     values = np.arange(256, dtype=np.uint8)
