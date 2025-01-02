@@ -1,6 +1,7 @@
 import math
 import numpy as np
 import sklearn.cluster
+import skimage.filters
 import dataclasses
 from . import utils
 
@@ -76,7 +77,18 @@ class NearestNeighbors:
 
 
 class BarcodeLibrary:
+    """ Class that efficiently matches reads to a set of barcodes.
+    Uses nearest neighbors to avoid comparing every read, barcode pair.
+    It can also accept barcode libraries with multiple barcodes, in which case
+    a set of reads is matched to a set of barcodes if all barcodes are present in
+    said set of reads.
+    """
     def __init__(self, barcodes, distance_function=None, batch_size=50):
+        """ Constructs a barcode library
+
+        barcodes: a sequence of strings of characters 'GTAC'. Can be a sequence of sets of
+            strings if there are multiple barcodes per entry.
+        """
         barcodes = np.asarray(barcodes)
         if barcodes.dtype.type is np.str_:
             barcodes = barcodes_to_vector(barcodes)
@@ -84,8 +96,10 @@ class BarcodeLibrary:
             barcodes = barcodes.reshape(barcodes.shape[0], -1)
         self.barcodes = barcodes
 
-        self.neighbors = sklearn.neighbors.NearestNeighbors(n_neighbors=2, metric='manhattan')
+        self.neighbors = sklearn.neighbors.NearestNeighbors(n_neighbors=2, metric='hamming')
         self.neighbors = self.neighbors.fit(self.barcodes)
+
+        #self.barcode_dists = self.neighbors.kneighbors(self.barcodes)[0][:,1]
 
     def permutations(self, max_val, num):
         perms = np.arange(max_val).reshape(-1, 1)
@@ -109,7 +123,22 @@ class BarcodeLibrary:
         """
 
     def nearest(self, reads, counts=None, match_threshold=2, second_threshold=None):
+        """ Find the best matching barcode for each read.
+
+        reads: Same as constructing the library, this can be a sequence of strings
+            or an 2d array with multiple reads per entry.
+        counts: If multiple reads are specified per entry, the counts of each can
+            be specified here. This should be the same shape as reads.
+        """
+        reads = np.asarray(reads)
+        if counts is not None:
+            counts = np.asarray(counts)
+        #print (reads)
+        #print (np.asarray(reads).shape)
+        #print (reads.dtype)
+        #print (max(map(len, reads.flat)))
         reads = barcodes_to_vector(reads)
+        #print (reads.shape)
         counts = counts if counts is not None else np.ones(reads.shape[:-1])
         ranges = np.stack([np.arange(len(reads)), np.arange(1, len(reads) + 1)], axis=-1)
 
@@ -119,6 +148,8 @@ class BarcodeLibrary:
             for read_set, count_set in zip(reads, counts):
                 read_set, count_set = read_set[count_set!=0], count_set[count_set!=0]
                 reads_needed = self.barcodes.shape[1] / read_set.shape[1]
+                #print (read_set, count_set)
+                #print (reads_needed, self.barcodes.shape, read_set.shape)
                 assert int(reads_needed) == reads_needed
                 if len(read_set) < int(reads_needed):
                     ranges.append((len(combined_reads), len(combined_reads)))
@@ -140,21 +171,25 @@ class BarcodeLibrary:
 
             reads, counts, ranges = np.array(combined_reads), np.array(combined_counts), np.array(ranges)
 
+        print (reads)
         dists, indices = self.neighbors.kneighbors(reads)
         matches = np.full(len(ranges), -1)
         match_dists = np.full(len(ranges), -1)
+
+        print (dists)
+        print (indices)
 
         for i, (begin, end) in enumerate(ranges):
             if begin == end: continue
 
             dist_section, indices_section = dists[begin:end], indices[begin:end]
-            dist_section[dist_section[:,0]==dist_section[:,1]] = np.inf
+            #dist_section[dist_section[:,0]==dist_section[:,1]] = np.inf
 
             min_index = np.argmin(dist_section[:,0])
             min_val = dist_section[min_index,0]
             dist_section[min_index,0] = np.inf
 
-            if dist_section[:,0].min() == min_val: continue
+            if dist_section.min() == min_val: continue
 
             matches[i] = indices_section[min_index,0]
             match_dists[i] = min_val / 2
@@ -163,6 +198,14 @@ class BarcodeLibrary:
 
 
 def calc_barcode_distances(reads, library, counts=None, max_edit_distance=None, read_mask=None, dtype=np.float32, reads_needed=None):
+    """ Calculates a full distance matrix between reads and a barcode library.
+
+    reads: array of barcode sequences, or 2d array if multiple reads are specified
+        per entry
+    library: same as reads, array or 2d array of barcode sequences
+    counts (optional): Integer array same shape as reads, can be used to specify
+        counts of each read.
+    """
     
     if type(reads) == list and type(reads[0]) == list:
         lengths = list(set(map(len, reads)))
@@ -360,16 +403,14 @@ def pack_barcodes(barcodes, dtype=None, out=None):
     barcodes = np.asarray(barcodes)
 
     orig_shape = barcodes.shape
-    barcodes = barcodes.reshape(-1).astype(bytes, copy=True)
+    values = barcodes_to_vector(barcodes)
 
-    bytes_needed = math.ceil(barcodes.dtype.itemsize / 4)
+    bytes_needed = math.ceil(values.shape[1] / 4)
     if bytes_needed > 8:
         raise ValueError("Unable to pack {}".format(barcodes.dtype))
 
     if dtype is None:
         dtype = [dt for dt in [np.uint8, np.uint16, np.uint32, np.uint64] if dt().itemsize >= bytes_needed][0]
-
-    values = np.frombuffer(barcodes, dtype=np.uint8).reshape(barcodes.shape[0], barcodes.dtype.itemsize)
 
     # scale data G(71),T(84),A(65),C(67) -> 0,1,2,3
     values %= 34
@@ -418,17 +459,19 @@ def unpack_barcodes(barcodes, length=None, out=None):
         out[...] = barcodes
 
 def barcodes_to_vector(barcodes):
+    """ Helper function to turn an array of strings into
+    a array of uint8 with an extra dimension of the characters
+    of the string
+    """
     barcodes = np.asarray(barcodes)
 
     orig_shape = barcodes.shape
-    barcodes = barcodes.reshape(-1)
-    barcodes = np.frombuffer(barcodes, dtype=np.array(barcodes[0][0]).dtype).reshape(barcodes.shape[0], -1)
+    barcodes = barcodes.reshape(-1).astype(bytes, copy=True)
+    max_len = max(map(len, barcodes.flat))
 
-    vecs = np.zeros((barcodes.shape[0], barcodes.shape[1] * 2), dtype=np.float32)
-    vecs[:,::2] = (barcodes == 'T').astype(np.float32) - (barcodes == 'G').astype(np.float32)
-    vecs[:,1::2] = (barcodes == 'C').astype(np.float32) - (barcodes == 'A').astype(np.float32)
+    values = np.frombuffer(barcodes, dtype=np.uint8).reshape(barcodes.shape[0], barcodes.dtype.itemsize)
+    return values.reshape(orig_shape + (-1,))
 
-    return vecs.reshape(orig_shape + (-1,))
 
 def make_edit_distance_table():
     values = np.arange(256, dtype=np.uint8)
@@ -462,30 +505,101 @@ def edit_distance(barcode1, barcode2, out=None):
     return dists.sum(axis=-1, out=out)
 
 
+
+def filter_reads(values, quality_threshold=None):
+    """ Filters out reads that are clearly not true reads.
+    """
+    if quality_threshold is None:
+        quality_threshold = 1.25
+
+    bases = np.argmax(values, axis=2)
+    qualities = np.partition(values, -2, axis=2)
+    qualities = qualities[:,:,-1] / np.maximum(qualities[:,:,-2], 0.000001)
+    #qualities = values.max(axis=2)
+    mask = np.any(bases != bases[:,0:1], axis=1)
+    mask = mask & (qualities.max(axis=1) < quality_threshold)
+
+    return values[mask]
+
+
 import matplotlib.pyplot as plt
+plot_counter = 0
 
-def cluster_reads(values):
-    #reads = [''.join('GTAC'[j] for j in np.argmax(vals, axis=1)) for vals in values]
-    if True or len(values) <= 1:
-        return values, np.array([1] * len(values), dtype=int)
+def cluster_reads(values, distance_threshold=None):
+    """ Clusters the values of many reads to determine which reads
+    are likely to belong to the same sequence, despite errors
+    that may have altered their sequence.
+    """
+    global plot_counter
+    reads = [''.join('GTAC'[j] for j in np.argmax(vals, axis=1)) for vals in values]
+    if not distance_threshold or len(values) <= 1:
+        all_values = {}
+        counts = {}
+        for read, vals in zip(reads, values):
+            all_values[read] = vals
+            counts.setdefault(read, 0)
+            counts[read] += 1
+        values = np.array(list(all_values.values()))
+        counts = np.array(list(counts.values()))
 
+        return values, counts
+        #return values, np.array([1] * len(values), dtype=int)
+
+    #"""
+    #print ("running cell ", plot_counter, values.shape)
+    #values = 1 - 1 / (values[:8] + 1)
     broadcast_values = values.reshape(values.shape[0], 1, *values.shape[1:])
     broadcast_values = np.broadcast_to(broadcast_values, (broadcast_values.shape[0], broadcast_values.shape[0], *broadcast_values.shape[2:]))
-    #prod = np.sum(broadcast_values * broadcast_values.transpose(1,0,2,3), axis=3)
-    #norm = np.linalg.norm(broadcast_values, axis=3)
+
+    prod = np.sum(broadcast_values * broadcast_values.transpose(1,0,2,3), axis=3)
+    norm = np.linalg.norm(broadcast_values, axis=3)
     #norm[norm==0] = 1
     #distance_matrix = prod / (norm * norm.transpose(1,0,2))
-    #distance_matrix = 2 - distance_matrix
-    #distance_matrix = np.sum(distance_matrix, axis=2)
-    broadcast_values = broadcast_values.reshape(broadcast_values.shape[:2] + (-1,))
-    distance_matrix = np.linalg.norm(broadcast_values - broadcast_values.transpose(1,0,2), axis=2)
-    print (distance_matrix)
-    print (distance_matrix.shape)
-    print (np.sort(distance_matrix.flatten()))
+    #distance_matrix = 1 - distance_matrix
+    distance_matrix = norm * norm.transpose(1,0,2) - prod
+    distance_matrix = np.sum(distance_matrix, axis=2)
+
+    #broadcast_values_maxes = np.argmax(broadcast_values, axis=3)
+    #same_seq = np.all(broadcast_values_maxes == broadcast_values_maxes.transpose(1,0,2), axis=2)
+    # pairs that are the same seq should be merged, this makes sure
+    # that these pairs have a distance below the threshold
+    #distance_matrix[same_seq] = np.minimum(distance_matrix[same_seq], distance_threshold - 0.0001)
+
+    #broadcast_values = broadcast_values.reshape(broadcast_values.shape[:2] + (-1,))
+    #distance_matrix = np.linalg.norm(broadcast_values - broadcast_values.transpose(1,0,2), axis=2)
+
+    #max_indices = np.argmax(broadcast_values, axis=3)
+    #max_values = np.maximum(broadcast_values.max(axis=3) - 1, 0)
+    #diff_maxes = max_indices != max_indices.transpose(1,0,2)
+    #distance_matrix_full = np.minimum(max_values, max_values.transpose(1,0,2)) * diff_maxes
+    #distance_matrix = distance_matrix_full.sum(axis=2)
+
+    #distance_matrix_full = np.linalg.norm(broadcast_values - broadcast_values.transpose(1,0,2,3), axis=3)
+    #distance_matrix = distance_matrix_full.sum(axis=2)
+
+    """
+    #print (distance_matrix)
+    #print (distance_matrix.shape)
+    #print (np.sort(distance_matrix.flatten()))
     fig, axes = plt.subplots(nrows=2, figsize=(8,11))
     axes[0].imshow(distance_matrix)
     axes[1].hist(distance_matrix.flatten(), bins=15)
-    fig.savefig('plots/read_clustersing_dists.png')
+    fig.savefig('plots/cell_{}_read_clustersing_dists.png'.format(plot_counter))
+
+    total_dists = distance_matrix.sum(axis=1)
+    fig, axes = plt.subplots(nrows=len(total_dists), figsize=(8, 6*len(total_dists)), sharey=True)
+
+    for i, index in enumerate(np.argsort(total_dists)):
+        vals = values[index]
+        for j in range(4):
+            axes[i].plot(list(range(len(vals))), vals[:,j], 'C' + str(j))
+            vals_maxes = np.argmax(vals, axis=1) == j
+            axes[i].plot(np.arange(len(vals))[vals_maxes], vals[vals_maxes,j], 'oC' + str(j))
+        read = ''.join('GTAC'[j] for j in np.argmax(vals, axis=1))
+        axes[i].set_title("{} {} dist {}".format(index, read, total_dists[index]))
+
+    fig.tight_layout()
+    fig.savefig('plots/cell_{}_read_clustering_total_dists.png'.format(plot_counter))
 
     pairs, dists = [], []
     for i in range(distance_matrix.shape[0]):
@@ -496,26 +610,40 @@ def cluster_reads(values):
     indices = np.argsort(dists)
     pairs, dists = pairs[indices], dists[indices]
 
-    fig, axes = plt.subplots(nrows=len(pairs) + 1, ncols=4, figsize=(16, 6*len(pairs) + 6))
+    fig, axes = plt.subplots(nrows=len(pairs) + 1, ncols=4, figsize=(16, 6*len(pairs) + 6), sharey=True)
     for i, pair, dist in zip(range(len(pairs)), pairs, dists):
         vals1, vals2 = values[pair[0]], values[pair[1]]
         for j in range(4):
-            axes[i+1,j].plot(list(range(len(vals1))), np.abs(vals1[:,j] - vals2[:,j]), ':')
+            #axes[i+1,j].plot(list(range(len(vals1))), distance_matrix_full[pair[0],pair[1]] * (j == max_indices[pair[0],pair[1]]), ':')
             axes[i+1,j].plot(list(range(len(vals1))), vals1[:,j], 'C' + str(pair[0]))
             axes[i+1,j].plot(list(range(len(vals2))), vals2[:,j], 'C' + str(pair[1]))
-            axes[i+1,j].set_ylim(0, 1)
-        axes[i+1,0].set_title("Pair {} {} dist {}".format(pair[0], pair[1], dist))
+            vals1_maxes = np.argmax(vals1, axis=1) == j
+            vals2_maxes = np.argmax(vals2, axis=1) == j
+            axes[i+1,j].plot(np.arange(len(vals1))[vals1_maxes], vals1[vals1_maxes,j], 'oC' + str(pair[0]))
+            axes[i+1,j].plot(np.arange(len(vals2))[vals2_maxes], vals2[vals2_maxes,j], 'oC' + str(pair[1]))
+            #axes[i+1,j].set_ylim(0, 1)
+        read1 = ''.join('GTAC'[j] for j in np.argmax(vals1, axis=1))
+        read2 = ''.join('GTAC'[j] for j in np.argmax(vals2, axis=1))
+        read1 = ''.join(let.lower() if let != other else let for let, other in zip(read1, read2))
+        read2 = ''.join(let.lower() if let != other else let for let, other in zip(read2, read1))
+        axes[i+1,0].set_title("{}\n{}\n dist {}".format(read1, read2, dist))
 
     for i, vals in enumerate(values):
         for j in range(4):
             axes[0,j].plot(list(range(len(vals))), vals[:,j], 'C' + str(i))
 
-    fig.savefig('plots/read_clustering_pairs.png')
+    fig.tight_layout()
+    fig.savefig('plots/cell_{}_read_clustering_pairs.png'.format(plot_counter))
+
+    if plot_counter > 50:
+        skdfl
+    #"""
+
     #norm = np.linalg.norm(broadcast_values, axis=2)
     #distance_matrix = np.sum(broadcast_values * broadcast_values.transpose(1,0,2), axis=2) / (norm * norm.T)
-    #model = sklearn.cluster.AgglomerativeClustering(n_clusters=None, distance_threshold=1, metric='precomputed', linkage='complete')
-    #model = model.fit(distance_matrix)
-    model = sklearn.cluster.AgglomerativeClustering(n_clusters=None, distance_threshold=1, linkage='complete').fit(values.reshape(values.shape[0], -1))
+    model = sklearn.cluster.AgglomerativeClustering(n_clusters=None, distance_threshold=distance_threshold, metric='precomputed', linkage='complete')
+    model = model.fit(distance_matrix)
+    #model = sklearn.cluster.AgglomerativeClustering(n_clusters=None, distance_threshold=distance_threshold, linkage='complete').fit(values.reshape(values.shape[0], -1))
     new_values = []
     counts = []
 
@@ -524,51 +652,89 @@ def cluster_reads(values):
         new_values.append(new_vals)
         counts.append(np.sum(model.labels_==i))
 
-    if len(values) > 10:
+    #if False and len(values) > 10:
+    if False:
         all_labels = np.unique(model.labels_)
-        fig, axes = plt.subplots(nrows=len(all_labels), ncols=4, figsize=(18, 6 * len(all_labels)))
+        fig, axes = plt.subplots(nrows=len(all_labels), ncols=4, figsize=(18, 6 * len(all_labels)), squeeze=False, sharey=True)
 
         for i in all_labels:
-            for vals in values[model.labels_==i]:
-                print (i, ''.join('GTAC'[j] for j in np.argmax(vals, axis=1)))
+            for valindex, vals in enumerate(values[model.labels_==i]):
+                #print (i, ''.join('GTAC'[j] for j in np.argmax(vals, axis=1)))
                 for j in range(4):
-                    axes[i,j].plot(list(range(len(vals))), vals[:,j])
+                    axes[i,j].plot(list(range(len(vals))), vals[:,j], color='C' + str(valindex))
+                    vals_maxes = np.argmax(vals, axis=1) == j
+                    axes[i,j].plot(np.arange(len(vals))[vals_maxes], vals[vals_maxes,j], 'o', color='C' + str(valindex))
             axes[i,0].set_title(''.join('GTAC'[j] for j in np.argmax(new_values[i], axis=1)))
 
-        fig.savefig('plots/read_clustering.png')
-        print (model.distances_.tolist())
-        print (model.distances_.min(), model.distances_.mean(), model.distances_.max())
-        ksdfl
+        fig.savefig('plots/cell_{}_read_clustering.png'.format(plot_counter))
+
+    #plot_counter += 1
 
     return np.array(new_values), np.array(counts)
 
 
 
 
-def call_reads(cells, poses, values, num_reads=8):
+def call_reads(cells, poses, values, num_reads=8, distance_threshold=None, quality_threshold=None):
+    """ Function to collect detected reads into cells
+
+    cells: int array of shape (W, H)
+        A segmentation mask of cells, 0 is the background and all values N>0 correspond
+        to the mask of cell N.
+    poses: int array of shape (N, 2)
+        The positions of the reads found.
+    values: float array of shape (N, cycle, channel)
+        The values of the reads across all cycles and channels.
+    """
     assert values.shape[2] == 4
     
-    totals = values.sum(axis=2)
-    totals[totals==0] = 1
-    values /= totals.reshape(values.shape[:-1] + (1,))
+    #totals = values.sum(axis=2)
+    #totals[totals==0] = 1
+    #values /= totals.reshape(values.shape[:-1] + (1,))
 
-    cell_reads = {}
+    #totals = np.partition(values.copy(), 2, axis=2)[:,:,2]
+    #totals = np.maximum(totals, 0.05)
+    #values /= totals.reshape(values.shape[:-1] + (1,))
+
+    totals = values.sum(axis=2).mean(axis=1)
+    totals[totals==0] = 1
+    values /= totals.reshape(-1,1,1)
+
+    cell_reads = {cell: [] for cell in np.unique(cells)}
+    if 0 in cell_reads: del cell_reads[0]
 
     for pos, vals in zip(poses, values):
         cell = cells[pos[0],pos[1]]
         if cell == 0: continue
         bases = ''.join('GTAC'[i] for i in np.argmax(vals, axis=1))
-        cell_reads.setdefault(cell, []).append((pos, bases, vals))
+        cell_reads[cell].append((pos, bases, vals))
 
     merged_reads = {}
+    merged_counts = {}
     for cell in cell_reads.keys():
         cell_vals = np.array([pair[2] for pair in cell_reads[cell]])
-        cell_vals, counts = cluster_reads(cell_vals)
+        #cell_vals = filter_reads(cell_vals, quality_threshold=quality_threshold)
+        """
+        if len(cell_vals) < 4: continue
+        if False and cell == 8096:
+            import tifffile
+            cell_images = tifffile.imread('../PBv2b_T3R1/stitching/output/well1_seqgrid5/tile02x02y/raw.tif')
+            pos1, pos2 = np.argwhere(cells == cell).min(axis=0), np.argwhere(cells == cell).max(axis=0)
+            tifffile.imwrite('tmp_cell.tif', cell_images[:,:,pos1[0]:pos2[0],pos1[1]:pos2[1]])
+            #tifffile.imwrite('tmp_cell_location.tif', (cells == cell).astype(np.uint8))
+        """
+        cell_vals, counts = cluster_reads(cell_vals, distance_threshold=distance_threshold)
 
         sorted_indices = np.argsort(counts)[::-1]
         cell_vals, counts = cell_vals[sorted_indices], counts[sorted_indices]
 
         reads = np.array([''.join('GTAC'[i] for i in np.argmax(vals, axis=1)) for vals in cell_vals])
-        merged_reads[cell] = list(zip(reads, counts))
+        #qualities = np.partition(cell_vals, -2, axis=1)
+        #qualities = qualities[:,:,-2] / np.maximum(qualities[:,:,-1], 0.00001)
+        #merged_reads[cell] = list(zip(reads, counts, qualities))
+        #merged_reads[cell] = list(zip(reads, counts))
+        merged_reads[cell] = reads
+        merged_counts[cell] = counts
 
-    return merged_reads, cell_reads
+    #return merged_reads, cell_reads
+    return merged_reads, merged_counts

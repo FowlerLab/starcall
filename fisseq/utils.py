@@ -1,3 +1,5 @@
+import collections
+import itertools
 import numpy as np
 import time
 import sys
@@ -181,4 +183,100 @@ def mark_dot(image, dot, inner_rad=3, outer_rad=6, color=1):
     image[x, y-outer_rad:y-inner_rad+1] = color
     image[x, y+inner_rad:y+outer_rad+1] = color
 
+_let_points = [
+    [[1, 1/2, 0, 0, 1/2, 1, 1, 1/2], [1, 1, 2/3, 1/3, 0, 0, 1/2, 1/2]],
+    [[0, 1, 1/2, 1/2], [1, 1, 1, 0]],
+    [[0, 0, 1, 0, 0, 1/2, 1, 1], [0, 1/3, 1/3, 1/3, 2/3, 1, 2/3, 0]],
+    [[1, 1/2, 0, 0, 1/2, 1], [1, 1, 2/3, 1/3, 0, 0]],
+]
+
+def sequence_plot(axis, sequences, separate=False):
+    if separate:
+        letter_sets = [[(let, 1) for let in seq] for seq in zip(*sequences)]
+        print (letter_sets)
+    else:
+        #letter_sets = list(map(collections.Counter, zip(*sequences)))
+        letter_sets = [sorted(list(collections.Counter(seq).items()), key=lambda pair: -'GTAC'.index(pair[0])) for seq in zip(*sequences)]
+    axis.set_xlim(0, len(letter_sets))
+    axis.set_ylim(0, 1)
+    x_margin = 0.1
+    y_margin = 0.02
+    
+    for i, lets in enumerate(letter_sets):
+        total = sum(pair[1] for pair in lets)
+        cur_count = 0
+        for let, count in lets:
+        #for let, count in sorted(list(lets.items()), key=lambda pair: -'GTAC'.index(pair[0])):
+            index = 'GTAC'.index(let)
+            xposes = np.array(_let_points[index][0]) * (1 - x_margin * 2) + x_margin + i
+            yposes = np.array(_let_points[index][1]) * (count / total - y_margin * 2) + y_margin + cur_count / total
+            axis.plot(xposes, yposes, color=['purple', 'blue', 'green', 'red'][index], linewidth=5, solid_capstyle='round')
+            cur_count += count
+
+def write_multicolumn(table, name, array, length_column=None):
+    """ Splits a 2d array into multiple columns in a dataframe for saving to csv or
+    similar format. Writes N columns with names name + '_0' to name + '_N' where N is array.shape[1].
+    Also supports ragged arrays where not every row is the same length, in this case pass
+    a list of lists. Writes the different number of items in each row to another column named
+    length_column, which defaults to name + '_length'
+    The complement function to read_multicolumn which can be used to extract the 2d array
+    back from the table.
+    """
+
+    name_fmt = name if '{' in name else (name + '_{}')
+
+    if type(array) == np.ndarray:
+        assert array.ndim == 2
+        columns = array.transpose()
+
+    else:
+        assert '{' not in name or length_column is not None, "If using a custom format string, length_column must be specifyed"
+        length_column = length_column or name + '_length'
+
+        lengths = np.fromiter(map(len, array), int, len(array))
+
+        dtype = np.array(next(iter(itertools.chain.from_iterable(array)))).dtype
+        for val in itertools.chain.from_iterable(array):
+            dtype = np.result_type(dtype, np.array(val).dtype)
+
+        columns = [np.zeros(len(array), dtype) for i in range(lengths.max())]
+        for i in range(lengths.max()):
+            for j in range(len(array)):
+                if i < len(array[j]):
+                    print ('setting', i, j, array[j][i])
+                    columns[i][j] = array[j][i]
+
+        table[length_column] = lengths
+
+    for i in range(len(columns)):
+        table[name_fmt.format(i)] = columns[i]
+
+def read_multicolumn(table, name, length_column=None):
+    """ The complement function to write_multicolumn. Finds all columns like name + '_XX' where
+    XX is an integer and concatenates the columns to create a 2d array.
+    If there is also a column name + '_length' it will be used to create a
+    ragged array, where each row has a different length.
+    """
+
+    name_fmt = name if '{' in name else (name + '_{}')
+
+    columns = []
+    index = 0
+    while name_fmt.format(index) in table:
+        columns.append(table[name_fmt.format(index)])
+        index += 1
+
+    if length_column is not None or name + '_length' in table:
+        length_column = length_column or name + '_length'
+        lengths = table[length_column]
+
+        array = []
+        for i in range(len(lengths)):
+            row = [columns[j][i] for j in range(lengths[i])]
+            array.append(row)
+
+        return array
+
+    else:
+        return np.stack(columns, axis=-1)
 
