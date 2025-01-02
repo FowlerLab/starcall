@@ -1,1 +1,1 @@
-from .constitch.constitch import *
+from constitch import *
