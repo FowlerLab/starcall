@@ -176,7 +176,7 @@ def estimate_background(images, percent=5, gaussian=8):
 
 def illumination_correction(images, out=None, background=None):
     if background is None:
-        background = calculate_background(images)
+        background = estimate_background(images)
     if out is None:
         out = np.empty_like(images)
 
