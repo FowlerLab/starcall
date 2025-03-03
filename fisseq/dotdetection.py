@@ -8,7 +8,10 @@ import numba
 
 from . import utils
 
-def dot_filter(image, large_sigma=4):
+def dot_filter(image, large_sigma=4, copy=True):
+    if copy:
+        image = image.copy()
+
     og_shape = image.shape
     if len(image.shape) == 3:
         image = image.reshape((1,) + image.shape)
@@ -43,6 +46,90 @@ def dot_filter2(image, kernel_size=10):
     np.clip(image, 0, None, out=image)
 
     return image.reshape(og_shape)
+
+def highlight_dots(image, gaussian_blur=None):
+    if len(image.shape) == 3:
+        image = image.reshape((1,) + image.shape)
+
+    sorted_image = np.sort(image, axis=1)
+    image -= sorted_image[:,-2:-1]
+    np.clip(image, 0, None, out=image)
+
+    if gaussian_blur is not None:
+        for i in range(len(image)):
+            image[i] = skimage.filters.gaussian(image[i], sigma=gaussian_blur, channel_axis=0)
+
+    image = image.std(axis=0)
+    image = image.sum(axis=0)
+    return image
+
+def detect_dots3(image,
+        min_sigma=1,
+        max_sigma=2,
+        num_sigma=7,
+        sigma_cutoff=1,
+        large_sigma=4,
+        return_sigmas=False,
+        threshold_rel=None,
+        median_index=None,
+        copy=True):
+
+    if copy: image = image.copy()
+
+    """
+    if len(image.shape) > 2:
+        if len(image.shape) == 3:
+            image = image.reshape((1,) + image.shape)
+        print (image.shape)
+
+        greyimage = highlight_dots(image, gaussian_blur=1)
+    else:
+        greyimage = image
+    """
+
+    #image = dot_filter(image)
+
+    """
+    maximage = image.max(axis=0)
+
+    median_index = median_index or len(maximage) // 2
+    
+    median = np.partition(maximage, median_index, axis=0)
+    median -= median[median_index]
+    np.max(median, axis=0, out=median[0])
+    """
+
+    #greyimage = median[0]
+    #tmp_layer = np.empty_like(greyimage)
+
+    """
+    first_sigma = 1
+    second_sigma = 2
+    skimage.filters.gaussian(greyimage, second_sigma, output=tmp_layer)
+    skimage.filters.gaussian(greyimage, first_sigma, output=greyimage)
+    greyimage -= tmp_layer
+    np.clip(greyimage, 0, None, out=greyimage)
+    """
+
+    image -= image.mean(axis=(2,3)).reshape(image.shape[0], image.shape[1],1,1)
+    image /= image.std(axis=(2,3)).reshape(image.shape[0], image.shape[1],1,1)
+    #image -= image.mean(axis=(0,2,3)).reshape(1,-1,1,1)
+    #image /= image.std(axis=(0,2,3)).reshape(1,-1,1,1)
+    #np.clip(image, 0, None, out=image)
+    
+    for i in range(image.shape[0]):
+        image[i] -= skimage.filters.gaussian(image[i], large_sigma, channel_axis=0)
+    greyimage = highlight_dots(np.clip(image, 0, None))
+
+    poses = skimage.feature.blob_log(greyimage, min_sigma=min_sigma, max_sigma=max_sigma, num_sigma=num_sigma, threshold_rel=threshold_rel)
+    sigmas = poses[:,2]
+
+    intposes = poses[:,:2].astype(int)
+    values = image[:,:,intposes[:,0],intposes[:,1]]
+
+    if return_sigmas:
+        return intposes, values, sigmas
+    return intposes, values
 
 def detect_dots(image,
         min_sigma=1,

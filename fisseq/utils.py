@@ -271,8 +271,8 @@ def read_multicolumn(table, name, length_column=None):
         lengths = table[length_column]
 
         array = []
-        for i in range(len(lengths)):
-            row = [columns[j][i] for j in range(lengths[i])]
+        for i in range(len(lengths.index)):
+            row = [columns[j].iloc[i] for j in range(lengths.iloc[i])]
             array.append(row)
 
         return array

@@ -532,7 +532,7 @@ def cluster_reads(values, distance_threshold=None):
     """
     global plot_counter
     reads = [''.join('GTAC'[j] for j in np.argmax(vals, axis=1)) for vals in values]
-    if not distance_threshold or len(values) <= 1:
+    if not distance_threshold or len(values) <= 1 or len(values) > 10:
         all_values = {}
         counts = {}
         for read, vals in zip(reads, values):
@@ -577,14 +577,15 @@ def cluster_reads(values, distance_threshold=None):
     #distance_matrix_full = np.linalg.norm(broadcast_values - broadcast_values.transpose(1,0,2,3), axis=3)
     #distance_matrix = distance_matrix_full.sum(axis=2)
 
-    """
+    #"""
     #print (distance_matrix)
     #print (distance_matrix.shape)
     #print (np.sort(distance_matrix.flatten()))
+    name = 'newfilter'
     fig, axes = plt.subplots(nrows=2, figsize=(8,11))
     axes[0].imshow(distance_matrix)
     axes[1].hist(distance_matrix.flatten(), bins=15)
-    fig.savefig('plots/cell_{}_read_clustersing_dists.png'.format(plot_counter))
+    fig.savefig('plots/cell_{}_{}_read_clustersing_dists.png'.format(name, plot_counter))
 
     total_dists = distance_matrix.sum(axis=1)
     fig, axes = plt.subplots(nrows=len(total_dists), figsize=(8, 6*len(total_dists)), sharey=True)
@@ -599,7 +600,7 @@ def cluster_reads(values, distance_threshold=None):
         axes[i].set_title("{} {} dist {}".format(index, read, total_dists[index]))
 
     fig.tight_layout()
-    fig.savefig('plots/cell_{}_read_clustering_total_dists.png'.format(plot_counter))
+    fig.savefig('plots/cell_{}_{}_read_clustering_total_dists.png'.format(name, plot_counter))
 
     pairs, dists = [], []
     for i in range(distance_matrix.shape[0]):
@@ -619,8 +620,8 @@ def cluster_reads(values, distance_threshold=None):
             axes[i+1,j].plot(list(range(len(vals2))), vals2[:,j], 'C' + str(pair[1]))
             vals1_maxes = np.argmax(vals1, axis=1) == j
             vals2_maxes = np.argmax(vals2, axis=1) == j
-            axes[i+1,j].plot(np.arange(len(vals1))[vals1_maxes], vals1[vals1_maxes,j], 'oC' + str(pair[0]))
-            axes[i+1,j].plot(np.arange(len(vals2))[vals2_maxes], vals2[vals2_maxes,j], 'oC' + str(pair[1]))
+            axes[i+1,j].plot(np.arange(len(vals1))[vals1_maxes], vals1[vals1_maxes,j], 'oC' + str(pair[0] % 10))
+            axes[i+1,j].plot(np.arange(len(vals2))[vals2_maxes], vals2[vals2_maxes,j], 'oC' + str(pair[1] % 10))
             #axes[i+1,j].set_ylim(0, 1)
         read1 = ''.join('GTAC'[j] for j in np.argmax(vals1, axis=1))
         read2 = ''.join('GTAC'[j] for j in np.argmax(vals2, axis=1))
@@ -633,7 +634,7 @@ def cluster_reads(values, distance_threshold=None):
             axes[0,j].plot(list(range(len(vals))), vals[:,j], 'C' + str(i))
 
     fig.tight_layout()
-    fig.savefig('plots/cell_{}_read_clustering_pairs.png'.format(plot_counter))
+    fig.savefig('plots/cell_{}_{}_read_clustering_pairs.png'.format(name, plot_counter))
 
     if plot_counter > 50:
         skdfl
@@ -696,9 +697,11 @@ def call_reads(cells, poses, values, num_reads=8, distance_threshold=None, quali
     #totals = np.maximum(totals, 0.05)
     #values /= totals.reshape(values.shape[:-1] + (1,))
 
-    totals = values.sum(axis=2).mean(axis=1)
-    totals[totals==0] = 1
-    values /= totals.reshape(-1,1,1)
+    #totals = values.sum(axis=2).mean(axis=1)
+    #totals[totals==0] = 1
+    #values /= totals.reshape(-1,1,1)
+
+    values /= values.mean()
 
     cell_reads = {cell: [] for cell in np.unique(cells)}
     if 0 in cell_reads: del cell_reads[0]
