@@ -67,8 +67,6 @@ def estimate_crosstalk(chan, chanref, percent=0.1, bins=8):
     ratios = np.sort(np.array(mins) / refvals)
     crosstalk = ratios[num_bins//4-1]
     #crosstalk = np.median(np.array(mins) / refvals)
-    if crosstalk > 0.5:
-        kslfsld
     return crosstalk
 
     keep = chanref > max(np.percentile(chanref, 90), 0)
