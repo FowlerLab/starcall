@@ -1,7 +1,7 @@
 from setuptools import setup
 
 setup(
-    name='fowlerlab-fisseq',
+    name='starcall',
     version='0.1',
-    packages=['fisseq/'],
+    packages=['starcall/'],
 )
