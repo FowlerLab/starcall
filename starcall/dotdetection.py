@@ -5,10 +5,64 @@ import skimage.feature
 import skimage.measure
 import matplotlib.pyplot as plt
 import numba
+import tifffile
 
 from . import utils
 
-def dot_filter(image, large_sigma=4, copy=True):
+def dot_filter(image, major_axis=4, minor_axis=0.5, copy=True):
+    """ Filter that removes any background in the sequencing images,
+    leaving only the dots from sequencing colonies. This is done using
+    top hat filter, subtracting the morphological opening of the image from
+    itself. This leaves only features smaller than the footprint, whose size
+    is specified by the parameters major_axis and minor_axis. To further
+    amplify only features that are circular, a series of filters are applied
+    with ellipses at different angles.
+
+    Args:
+        major_axis (float): the major axis of the ellipse used as a footprint
+        minor_axis (float): the minor axis of the ellipse used as a footprint
+        copy (bool default True): Whether the input image should be copied or modified in place
+    """
+    if copy:
+        image = image.copy()
+
+    orig_shape = image.shape
+    image = image.reshape(-1, *orig_shape[2:])
+
+    footprint = skimage.morphology.disk(major_axis)
+    footprints = np.zeros((4, footprint.shape[0], footprint.shape[1]), footprint.dtype)
+    mid = major_axis
+    mid2 = major_axis + 1
+    #footprints[0,kernel_size+1,:] = 1
+    #footprints[1,:,kernel_size+1] = 1
+    #footprints[2,list(range(footprint.shape[0])),list(range(footprint.shape[0]))] = 1
+    #footprints[3,list(reversed(range(footprint.shape[0]))),list(range(footprint.shape[0]))] = 1
+    #footprints[0,:mid2,:mid2] = footprint[:mid2,:mid2]
+    #footprints[1,:mid2,mid:] = footprint[:mid2,mid:]
+    #footprints[2,mid:,:mid2] = footprint[mid:,:mid2]
+    #footprints[3,mid:,mid:] = footprint[mid:,mid:]
+
+    for i, rot in enumerate([-np.pi/4, 0, np.pi/4, np.pi/2]):
+        rows, cols = skimage.draw.ellipse(major_axis, major_axis, major_axis+1, minor_axis, rotation=rot)
+        footprints[i,rows,cols] = 1
+
+    #print (footprints)
+    new_background = np.empty_like(image[i])
+    for i in range(image.shape[0]):
+        #background[i] = skimage.morphology.opening(background[i], footprint)
+        #background[i] = skimage.filters.gaussian(background[i], kernel_size)
+        new_background[...] = 0
+        for j in range(len(footprints)):
+            new_background = np.maximum(new_background, skimage.morphology.opening(image[i], footprints[j]))
+        image[i] -= new_background
+
+    image = image.reshape(orig_shape)
+
+    #np.clip(image, 0, None, out=image)
+
+    return image
+
+def dot_filter_old(image, large_sigma=4, copy=True):
     if copy:
         image = image.copy()
 
@@ -48,90 +102,99 @@ def dot_filter2(image, kernel_size=10):
     return image.reshape(og_shape)
 
 def highlight_dots(image, gaussian_blur=None):
+    """ Combine an image containing multiple sequencing cycles into a single
+    grayscale image, containing only the dots from sequencing colonies.
+    To filter for sequencing dots, we subtract the second maximal channel, then
+    take the standard deviation across cycles and sum along channels. This
+    means only features that are bright in a single channel and changing frequently
+    are conserved in the final image.
+
+    Args:
+        image (ndarray of shape (num_cycles, num_channels, width, height)): Input image to filter
+        gaussian_blur (float, optional): if specified a gaussian blur is applied before combining
+    """
     if len(image.shape) == 3:
         image = image.reshape((1,) + image.shape)
 
     sorted_image = np.sort(image, axis=1)
     image -= sorted_image[:,-2:-1]
-    np.clip(image, 0, None, out=image)
 
     if gaussian_blur is not None:
         for i in range(len(image)):
             image[i] = skimage.filters.gaussian(image[i], sigma=gaussian_blur, channel_axis=0)
 
+    np.clip(image, 0, None, out=image)
+
     image = image.std(axis=0)
     image = image.sum(axis=0)
     return image
 
-def detect_dots3(image,
+def detect_dots(image,
         min_sigma=1,
         max_sigma=2,
         num_sigma=7,
-        sigma_cutoff=1,
-        large_sigma=4,
         return_sigmas=False,
-        threshold_rel=None,
-        median_index=None,
         copy=True):
+    """ Takes a raw sequencing image set and identifies and extracts all sequencing reads
+    from the image, filtering out cell background and debris. This is done by calling
+    dot_filter to filter out any background in the image, then calling highlight_dots
+    to create a single grayscale image, which is then passed to skimage.feature.blob_log.
+    The values at these positions in the filtered image are extracted, and returned along
+    with the positions.
+
+    Args:
+        image (ndarray of shape (n_cycles, n_channels, width, height)): The input image
+        min_sigma, max_sigma, num_sigma (float): Parameters passed to skimage.feature.blob_log
+        return_sigmas (bool, default False): Whether to return the sigma values returned from skimage.feature.blob_log
+        copy (bool default True): Whether the image should be copied or modified in place.
+
+    Returns:
+        poses (ndarray of shape (n_dots, 2)): The positions of all detected dots in the image
+        values (ndarray of shape (n_dots, n_cycles, n_channels)): The values for each dot across cycles and channels
+        if return_sigmas is specified:
+        sigmas (ndarray of shape (n_dots,)): The estimated sigma of all dots detected in the image
+    """
 
     if copy: image = image.copy()
 
-    """
-    if len(image.shape) > 2:
-        if len(image.shape) == 3:
-            image = image.reshape((1,) + image.shape)
-        print (image.shape)
+    filtered = dot_filter(image, major_axis=4, minor_axis=0.5, copy=False)
+    #tifffile.imwrite('tmp_dot_filter_filtered_12.tif', filtered)
+    greyimage = highlight_dots(filtered.copy())
+    #tifffile.imwrite('tmp_dot_greyimage.tif', greyimage)
 
-        greyimage = highlight_dots(image, gaussian_blur=1)
-    else:
-        greyimage = image
-    """
-
-    #image = dot_filter(image)
-
-    """
-    maximage = image.max(axis=0)
-
-    median_index = median_index or len(maximage) // 2
-    
-    median = np.partition(maximage, median_index, axis=0)
-    median -= median[median_index]
-    np.max(median, axis=0, out=median[0])
-    """
-
-    #greyimage = median[0]
-    #tmp_layer = np.empty_like(greyimage)
-
-    """
-    first_sigma = 1
-    second_sigma = 2
-    skimage.filters.gaussian(greyimage, second_sigma, output=tmp_layer)
-    skimage.filters.gaussian(greyimage, first_sigma, output=greyimage)
-    greyimage -= tmp_layer
-    np.clip(greyimage, 0, None, out=greyimage)
-    """
-
-    image -= image.mean(axis=(2,3)).reshape(image.shape[0], image.shape[1],1,1)
-    image /= image.std(axis=(2,3)).reshape(image.shape[0], image.shape[1],1,1)
-    #image -= image.mean(axis=(0,2,3)).reshape(1,-1,1,1)
-    #image /= image.std(axis=(0,2,3)).reshape(1,-1,1,1)
-    #np.clip(image, 0, None, out=image)
-    
-    for i in range(image.shape[0]):
-        image[i] -= skimage.filters.gaussian(image[i], large_sigma, channel_axis=0)
-    greyimage = highlight_dots(np.clip(image, 0, None))
-
-    poses = skimage.feature.blob_log(greyimage, min_sigma=min_sigma, max_sigma=max_sigma, num_sigma=num_sigma, threshold_rel=threshold_rel)
+    poses = skimage.feature.blob_log(greyimage,
+        min_sigma=min_sigma,
+        max_sigma=max_sigma,
+        num_sigma=num_sigma,
+        threshold=greyimage.mean(),
+    )
     sigmas = poses[:,2]
+
+    footprint = skimage.morphology.disk(2)
+    for i in range(filtered.shape[0]):
+        for j in range(filtered.shape[1]):
+            filtered[i,j] = skimage.morphology.dilation(filtered[i,j], footprint)
 
     intposes = poses[:,:2].astype(int)
     values = image[:,:,intposes[:,0],intposes[:,1]]
+    values = values.transpose(2,0,1)
+
+    #print (values.shape)
+    #print (np.percentile(values, 75, axis=0))
+    #print (np.percentile(values, 99, axis=0))
+    #print (np.mean(values, axis=0))
+    #print (values.min(axis=0), values.max(axis=0))
+    values /= np.maximum(0.00000001, np.percentile(values, 75, axis=0)[None,:,:])
+    #print (np.percentile(values, 75, axis=0))
+    #print (np.percentile(values, 99, axis=0))
+    #print (np.mean(values, axis=0))
+    #print (values.min(axis=0), values.max(axis=0))
 
     if return_sigmas:
         return intposes, values, sigmas
     return intposes, values
 
-def detect_dots(image,
+def detect_dots_old(image,
         min_sigma=1,
         max_sigma=2,
         num_sigma=7,

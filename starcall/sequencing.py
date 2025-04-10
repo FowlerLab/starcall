@@ -577,7 +577,7 @@ def cluster_reads(values, distance_threshold=None):
     #distance_matrix_full = np.linalg.norm(broadcast_values - broadcast_values.transpose(1,0,2,3), axis=3)
     #distance_matrix = distance_matrix_full.sum(axis=2)
 
-    #"""
+    """
     #print (distance_matrix)
     #print (distance_matrix.shape)
     #print (np.sort(distance_matrix.flatten()))
