@@ -8,6 +8,7 @@ import numba
 import tifffile
 
 from . import utils
+from .reads import Read, ReadSet
 
 def dot_filter(image, major_axis=4, minor_axis=0.5, copy=True):
     """ Filter that removes any background in the sequencing images,
@@ -134,6 +135,7 @@ def detect_dots(image,
         max_sigma=2,
         num_sigma=7,
         return_sigmas=False,
+        channels=None,
         copy=True):
     """ Takes a raw sequencing image set and identifies and extracts all sequencing reads
     from the image, filtering out cell background and debris. This is done by calling
@@ -149,8 +151,7 @@ def detect_dots(image,
         copy (bool default True): Whether the image should be copied or modified in place.
 
     Returns:
-        poses (ndarray of shape (n_dots, 2)): The positions of all detected dots in the image
-        values (ndarray of shape (n_dots, n_cycles, n_channels)): The values for each dot across cycles and channels
+        reads (ReadSet): The reads detected in the image, each with a position and read values.
         if return_sigmas is specified:
         sigmas (ndarray of shape (n_dots,)): The estimated sigma of all dots detected in the image
     """
@@ -190,9 +191,11 @@ def detect_dots(image,
     #print (np.mean(values, axis=0))
     #print (values.min(axis=0), values.max(axis=0))
 
+    reads = ReadSet(positions=poses[:,:2], values=values, channels=channels)
+
     if return_sigmas:
-        return intposes, values, sigmas
-    return intposes, values
+        return reads, sigmas
+    return reads
 
 def detect_dots_old(image,
         min_sigma=1,
