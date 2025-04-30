@@ -4,6 +4,9 @@ process them.
 """
 
 import re
+import time
+import itertools
+import heapq
 import numpy as np
 import csv
 import pandas
@@ -80,7 +83,6 @@ class Read:
         if sequence is not None:
             sequence = np.asarray(sequence, dtype='U').reshape(-1)
             if values is not None and len(sequence[0]) != values.shape[0]:
-                print (values.shape, sequence.shape, sequence.dtype)
                 raise ValueError("Expected values.shape[0] and len(sequence) to be equivalent")
             self.n_cycles = len(sequence[0])
 
@@ -89,7 +91,7 @@ class Read:
         self._sequence = sequence
         self.channels = channels
         self.n_channels = len(channels)
-        self.extra_props = {name: np.asarray(val).reshape(-1) for name, val in kwargs.items()}
+        self._attrs = {name: np.asarray(val).reshape(-1) for name, val in kwargs.items()}
 
     def __repr__(self):
         parts = []
@@ -100,7 +102,7 @@ class Read:
             parts.append('values=[...]')
         parts.append(self.sequence)
 
-        for name, val in self.extra_props.items():
+        for name, val in self._attrs.items():
             parts.append('{}={}'.format(name, val[0]))
 
         return 'Read({})'.format(', '.join(parts))
@@ -147,10 +149,48 @@ class Read:
         seq = np.frombuffer(self._sequence, 'U1')
         seq[...] = value
 
+    @property
+    def qualities(self):
+        return self.values.max(axis=1)
+
+    @property
+    def attrs(self):
+        return ReadAttrs(self._attrs)
+
+    """
     def __getattr__(self, name):
-        if name in self.extra_props:
-            return self.extra_props[name]
+        if name in self._attrs:
+            return self._attrs[name]
         raise AttributeError("type object '{}' has no attribute '{}'".format(type(self).__name__, name))
+    """
+
+class ReadAttrs:
+    def __init__(self, attrs):
+        self.attrs = attrs
+
+    def __getitem__(self, index):
+        return self.attrs[index][0]
+
+    def __setitem__(self, index, value):
+        self.attrs[index][0] = value
+
+    def __iter__(self):
+        return iter(self.attrs)
+
+    def keys(self):
+        return self.attrs.keys()
+
+    def values(self):
+        for val in self.attrs.values():
+            yield val[0]
+
+    def items(self):
+        for key, val in self.attrs.items():
+            yield key, val[0]
+
+    def __len__(self):
+        return len(self.attrs)
+
 
 
 class ReadSet:
@@ -202,7 +242,7 @@ class ReadSet:
 
     """
 
-    def __init__(self, positions=None, values=None, sequences=None, image=None, channels=None, reads=None, **extra_props):
+    def __init__(self, positions=None, values=None, sequences=None, image=None, channels=None, reads=None, **attrs):
         positions = np.asarray(positions) if positions is not None else None
 
         if positions is not None and isinstance(positions[0], Read):
@@ -226,10 +266,10 @@ class ReadSet:
                 for i in range(self.n_reads):
                     reads[i]._sequence = sequences[i:i+1]
 
-            for name in reads[0].extra_props:
-                extra_props[name] = np.array([read.extra_props[name][0] for read in reads])
+            for name in reads[0].attrs:
+                attrs[name] = np.array([read._attrs[name][0] for read in reads])
                 for i in range(self.n_reads):
-                    reads[i].extra_props[name] = extra_props[name][i:i+1]
+                    reads[i].attrs[name] = attrs[name][i:i+1]
 
             channels = reads[0].channels
 
@@ -267,8 +307,8 @@ class ReadSet:
             self.n_reads = sequences.shape[0]
             self.n_cycles = int(str(sequences.dtype).split('U')[-1])
 
-        for name in extra_props:
-            extra_props[name] = np.asarray(extra_props[name])
+        for name in attrs:
+            attrs[name] = np.asarray(attrs[name])
 
         if reads is None:
             reads = []
@@ -278,7 +318,7 @@ class ReadSet:
                     values = values[i] if values is not None else None,
                     sequence = sequences[i:i+1] if sequences is not None else None,
                     channels = channels,
-                    **{name: vals[i:i+1] for name, vals in extra_props.items()}
+                    **{name: vals[i:i+1] for name, vals in attrs.items()}
                 ))
 
         self.reads = reads
@@ -287,7 +327,7 @@ class ReadSet:
         self._sequences = sequences
         self.channels = channels
         self.n_channels = len(channels)
-        self.extra_props = extra_props
+        self.attrs = attrs
 
     def __repr__(self):
         if len(self) > 8:
@@ -335,10 +375,16 @@ class ReadSet:
         seq = np.frombuffer(self._sequences, 'U1').reshape(self.n_reads, self.n_cycles)
         seq[...] = value
 
+    @property
+    def qualities(self):
+        return self.values.max(axis=2)
+
+    """
     def __getattr__(self, name):
-        if name in self.extra_props:
-            return self.extra_props[name]
+        if name in self.attrs:
+            return self.attrs[name]
         raise AttributeError("type object '{}' has no attribute '{}'".format(type(self).__name__, name))
+    """
 
     def __getitem__(self, index):
         if type(index) == slice:
@@ -348,15 +394,23 @@ class ReadSet:
                 sequences = self._sequences[index] if self._sequences is not None else None,
                 channels = self.channels,
                 reads = self.reads[index],
-                **{name: vals[index] for name, vals in self.extra_props.items()}
+                **{name: vals[index] for name, vals in self.attrs.items()}
             )
-        return self.reads[index]
+        #return self.reads[index]
+        return Read(
+            position = self.positions[index] if self.positions is not None else None,
+            values = self.values[index] if self.values is not None else None,
+            sequence = self._sequences[index:index+1] if self._sequences is not None else None,
+            channels = self.channels,
+            **{name: vals[index:index+1] for name, vals in self.attrs.items()}
+        )
 
     def __iter__(self):
-        return self.reads
+        for i in range(self.n_reads):
+            yield self[i]
 
-    def __contains__(self, value):
-        return value in self.reads
+    #def __contains__(self, value):
+        #return value in self.reads
 
     def __len__(self):
         return self.n_reads
@@ -382,24 +436,18 @@ class ReadSet:
         values = self.values
 
         if method == 'large':
-            values = values.reshape(values.shape[0], -1, 4)
             values /= np.maximum(1, np.linalg.norm(values, axis=2)[:,:,None])
-            values = values.reshape(values.shape[0], -1)
         if method == 'full':
-            values = values.reshape(values.shape[0], -1, 4)
             values /= np.maximum(0.0000000001, np.linalg.norm(values, axis=2)[:,:,None])
-            values = values.reshape(values.shape[0], -1)
         if method == 'sub':
-            values = values.reshape(values.shape[0], -1, 4)
             sorted_values = np.sort(values, axis=2)
             values -= sorted_values[:,:,-2:-1]
-            values = values.reshape(values.shape[0], -1)
 
         self.values = values
 
     def groupby(self, colname, sort_key=None):
         groups = {}
-        for label, read in zip(self.extra_props[colname], self.reads):
+        for label, read in zip(self.attrs[colname], self):
             groups.setdefault(label, []).append(read)
         
         if sort_key:
@@ -444,7 +492,7 @@ class ReadSet:
 
         def get_method(method):
             if method is None:
-                return default_method
+                method = default_method
 
             if callable(method):
                 return method
@@ -457,7 +505,7 @@ class ReadSet:
             raise ValueError('Unrecognized aggregation method {}'.format(method))
 
         attrs = {}
-        for name, attr_vals in self.extra_props.items():
+        for name, attr_vals in self.attrs.items():
             default_method = 'mean' if np.issubdtype(attr_vals.dtype, np.floating) else 'mode'
             cur_method = method.get(name, default_method) if isinstance(method, dict) else method
             cur_method = get_method(cur_method)
@@ -501,7 +549,7 @@ class ReadSet:
             qualities = self.qualities
             table['quality'] = qualities.mean(axis=1)
             for i in range(self.n_cycles):
-                table['quality_{:02}'.format(i)] = qualities[i]
+                table['quality_{:02}'.format(i)] = qualities[:,i]
 
         if self.values is not None:
             for cycle in range(self.n_cycles):
@@ -512,7 +560,7 @@ class ReadSet:
             for i, chan in enumerate(self.channels):
                 table['chan{:02}'.format(i)] = chan
 
-        table.update(self.extra_props)
+        table.update(self.attrs)
 
         table = pandas.DataFrame(table)
         return table
@@ -549,15 +597,15 @@ class ReadSet:
         else:
             values = None
 
-        extra_props = {}
+        attrs = {}
         for col in table.columns:
             if (col not in ('xpos', 'ypos', 'read', 'quality')
                     and not re.match('value_cycle\d\d_ch\d\d$', col)
                     and not re.match('chan\d\d$', col)
                     and not re.match('quality_\d+$', col)):
-                extra_props[col] = table[col].to_numpy()
+                attrs[col] = table[col].to_numpy()
 
-        reads = ReadSet(positions=positions, values=values, sequences=sequences, channels=channels, **extra_props)
+        reads = ReadSet(positions=positions, values=values, sequences=sequences, channels=channels, **attrs)
         return reads
 
 class ReadSetGroups:
@@ -612,25 +660,25 @@ class ReadSetGroups:
                 seqs.append(group_seqs[np.argmax(counts)])
             params['sequences'] = np.array(seqs)
 
-        for name in self.groups[0].extra_props.keys():
-            dtype = self.groups[0].extra_props[name].dtype
+        for name in self.groups[0].attrs.keys():
+            dtype = self.groups[0].attrs[name].dtype
             default_method = 'mean' if np.issubdtype(dtype, np.floating) else 'mode'
             cur_method = method.get(name, default_method)
 
             if callable(cur_method):
-                vals = [cur_method(group.extra_props[name]) for group in self.groups]
+                vals = [cur_method(group.attrs[name]) for group in self.groups]
             elif cur_method == 'mean':
-                vals = [group.extra_props[name].mean(axis=0) for group in self.groups]
+                vals = [group.attrs[name].mean(axis=0) for group in self.groups]
             elif cur_method == 'min':
-                vals = [group.extra_props[name].min(axis=0) for group in self.groups]
+                vals = [group.attrs[name].min(axis=0) for group in self.groups]
             elif cur_method == 'max':
-                vals = [group.extra_props[name].max(axis=0) for group in self.groups]
+                vals = [group.attrs[name].max(axis=0) for group in self.groups]
             elif cur_method == 'sum':
-                vals = [group.extra_props[name].sum(axis=0) for group in self.groups]
+                vals = [group.attrs[name].sum(axis=0) for group in self.groups]
             elif cur_method == 'mode':
                 vals = []
                 for group in self.groups:
-                    group_vals, counts = np.unique(group.extra_props[name], return_counts=True)
+                    group_vals, counts = np.unique(group.attrs[name], return_counts=True)
                     vals.append(group_vals[np.argmax(counts)])
 
             params[name] = np.array(vals)
@@ -749,7 +797,11 @@ class ReadSetGroups:
 
         return ReadSetGroups(groups, grouped_by=None if len(common_cols) == 0 else common_cols[0])
 
-
+class ReadSetAttrs(dict):
+    def __setitem__(self, name, value):
+        super().__setitem__(name, value)
+        if hasattr(self, 'callback'):
+            self.callback(name, value)
 
 class ReadTable(pandas.DataFrame):
     @property
@@ -793,7 +845,7 @@ def distance_matrix(
             sequence_weight=1.0,
             matrix=None,
             debug=True,
-            progress=False):
+            progress=True):
 
     debug, progress = utils.log_env(debug, progress)
 
@@ -852,7 +904,32 @@ def distance_matrix(
                 continue
 
             direct_dist = pos_dist
-            value_dist = np.linalg.norm(reads.values[i]) * np.linalg.norm(reads.values[j]) - np.sum(reads.values[i] * reads.values[j])
+
+            read1, read2 = reads[i], reads[j]
+            seq1, seq2 = read1.sequence_array, read2.sequence_array
+
+            #times = []
+            #times.append(time.time())
+            seq_dist = np.sum(seq1 != seq2)
+            #times.append(time.time())
+
+            #value_dist = np.linalg.norm(reads.values[i]) * np.linalg.norm(reads.values[j]) - np.sum(reads.values[i] * reads.values[j])
+            lengths = np.linalg.norm(read1.values, axis=1) * np.linalg.norm(read2.values, axis=1)
+            #times.append(time.time())
+            prod = np.sum(read1.values * read2.values, axis=1)
+            #times.append(time.time())
+            value_dist = lengths - prod
+            #times.append(time.time())
+            value_dist = value_dist * (seq1 != seq2)
+            #times.append(time.time())
+            #value_dist = value_dist * seq_dist
+            #print (value_dist)
+            #value_dist = np.sum(value_dist * value_dist)
+            value_dist = np.sum(value_dist)
+            #times.append(time.time())
+
+            #debug ([end - start for start, end in zip(times, times[1:])])
+
 
             #debug ('value dist', value_dist, np.linalg.norm(values[i]), np.linalg.norm(values[j]))
             #debug ('   ', ''.join(np.array(list('GTAC'))[values[i].reshape(-1,4).argmax(axis=1)]))
@@ -871,7 +948,9 @@ def distance_matrix(
                 #debug ('not in cell matrix', i)
 
             if i in cell_matrix and j in cell_matrix:
-                for cell in set(cell_matrix[i].keys()) & set(cell_matrix[j].keys()):
+                possible_cells = set(cell_matrix[i].keys()) & set(cell_matrix[j].keys())
+                #print (possible_cells)
+                for cell in possible_cells:
                     dist = cell_matrix[i][cell] + cell_matrix[j][cell]
                     if dist < min_cell_dist:
                         min_cell_dist = dist
@@ -880,11 +959,49 @@ def distance_matrix(
                         #debug ('cell closer', cell, dist)
 
             #debug ('cell dist', min_cell_dist)
-            dist = min_cell_dist * positional_weight / distance_cutoff + value_dist * value_weight / reads.n_cycles
+            dist = min_cell_dist * positional_weight + value_dist * value_weight + seq_dist * sequence_weight
+            #dist = min_cell_dist * positional_weight / distance_cutoff + value_dist * value_weight / reads.n_cycles
             matrix[i,j] = dist
 
     #fig.savefig('tmp_dists.png')
     return matrix
+
+
+class Heap:
+    REMOVED = '<removed-task>' # placeholder for a removed task
+
+    def __init__(self):
+        self.pq = [] # list of entries arranged in a heap
+        self.entry_finder = {} # mapping of tasks to entries
+        self.counter = itertools.count() # unique sequence count
+
+    def push(self, task, priority=0):
+        'Add a new task or update the priority of an existing task'
+        if task in self.entry_finder:
+            self.remove_task(task)
+        count = next(self.counter)
+        entry = [priority, count, task]
+        self.entry_finder[task] = entry
+        heapq.heappush(self.pq, entry)
+
+    def remove(self, task):
+        'Mark an existing task as REMOVED.  Raise KeyError if not found.'
+        entry = self.entry_finder.pop(task)
+        entry[-1] = Heap.REMOVED
+
+    def pop(self):
+        'Remove and return the lowest priority task. Raise KeyError if empty.'
+        while self.pq:
+            priority, count, task = heapq.heappop(self.pq)
+            if task is not Heap.REMOVED:
+                del self.entry_finder[task]
+                return task
+        raise KeyError('pop from an empty priority queue')
+
+    def empty(self):
+        while self.pq and self.pq[0][2] == Heap.REMOVED:
+            priority, count, task = heapq.heappop(self.pq)
+        return len(self.pq) == 0
 
 
 def cluster_reads(distance_matrix,
@@ -897,17 +1014,22 @@ def cluster_reads(distance_matrix,
     cluster_dists = {}
     num_reads = 0
 
+    print_matrix = False
+
+    heap = Heap()
+
     for (i, j), distance in distance_matrix.items():
         cluster_dists.setdefault(i, {})[j] = distance
         cluster_dists.setdefault(j, {})[i] = distance
         num_reads = max(num_reads, i, j)
+        heap.push((i,j), distance)
 
     #cluster_dists = distance_matrix.copy()
     #num_reads = max(max(pair) for pair in distance_matrix) + 1
     num_reads += 1
 
     clusters = np.arange(num_reads).reshape(-1,1).tolist()
-    debug (len(clusters))
+    #debug (len(clusters))
     cluster_indices = np.arange(num_reads)
 
     #for pair, dist in distance_matrix.items():
@@ -951,63 +1073,111 @@ def cluster_reads(distance_matrix,
     if linkage == 'max':
         merge_dists_func = merge_dists_max
 
-    for pair, dist in progress(sorted(distance_matrix.items(), key=lambda kv: -kv[1])):
-        """
+    #next_pairs = sorted(distance_matrix.items(), key=lambda kv: kv[1])
+    #next_pairs = [pair for pair, dist in next_pairs]
+
+    #while len(next_pairs):
+        #pairs = next_pairs
+        #next_pairs = []
+        #for pair in pairs:
+    #for pair, dist in progress(sorted(distance_matrix.items(), key=lambda kv: kv[1])):
+            #print (cluster_indices, pair)
+    """
     while True:
-        min_pair = None
-        min_dist = threshold
-        for cluster1 in cluster_dists.keys():
-            for cluster2, dist in cluster_dists[cluster1].items():
-                if dist < min_dist:
-                    min_dist = dist
-                    min_pair = cluster1, cluster2
+            min_pair = None
+            min_dist = threshold
+            for cluster1 in cluster_dists.keys():
+                for cluster2, dist in cluster_dists[cluster1].items():
+                    if dist < min_dist:
+                        min_dist = dist
+                        min_pair = cluster1, cluster2
 
-        if min_pair is None:
-            break
+            if min_pair is None:
+                break
 
-        pair = min_pair
-        if pair[0] > pair[1]:
-            pair = pair[1], pair[0]
+            pair = min_pair
+            if pair[0] > pair[1]:
+                pair = pair[1], pair[0]
 
-        #min_pair = min(((i, *min(cluster_dists[i].items(), key=lambda kv: kv[1])) for i in cluster_dists.keys()), key=lambda x: x[2])
+            #min_pair = min(((i, *min(cluster_dists[i].items(), key=lambda kv: kv[1])) for i in cluster_dists.keys()), key=lambda x: x[2])
 
-        #if min_pair[2] > threshold:
-            #break
+            #if min_pair[2] > threshold:
+                #break
 
-        #pair = min_pair[:2]
+            #pair = min_pair[:2]
 
-        """
-        pair = cluster_indices[pair[0]], cluster_indices[pair[1]]
+            """
+    while not heap.empty():
+            """
+            orig_pair = pair
+            pair = cluster_indices[pair[0]], cluster_indices[pair[1]]
 
-        assert len(clusters[pair[0]]) != 0 and len(clusters[pair[1]]) != 0
+            assert len(clusters[pair[0]]) != 0 and len(clusters[pair[1]]) != 0
 
-        if pair[1] not in cluster_dists[pair[0]]:
-            continue
+            if pair[1] not in cluster_dists[pair[0]]:
+                next_pairs.append(orig_pair)
+                continue
 
-        cluster_dist = cluster_dists[pair[0]][pair[1]]
-        if cluster_dist > threshold:
-            continue
-        #"""
+            cluster_dist = cluster_dists[pair[0]][pair[1]]
+            if cluster_dist > threshold:
+                continue
+            #"""
 
-        #debug ('Merging ', pair, cluster_dists[pair[0]][pair[1]])
+            if print_matrix:
+                for i in range(num_reads):
+                    items = []
+                    for j in range(num_reads):
+                        if (i,j) not in heap.entry_finder:
+                            items.append(' . ')
+                        else:
+                            heap_dist = heap.entry_finder[i,j][0]
+                            dist1 = cluster_dists[i][j]
+                            dist2 = cluster_dists[j][i]
+                            assert heap_dist == dist1 == dist2
+                            items.append('{:.1f}'.format(heap_dist))
 
-        for other in cluster_dists[pair[0]].keys():
-            del cluster_dists[other][pair[0]]
-        for other in cluster_dists[pair[1]].keys():
-            del cluster_dists[other][pair[1]]
+                    line = ' '.join('{:3}'.format(item) for item in items)
+                    debug (line)
 
-        new_dists = merge_dists_func(pair[0], pair[1], cluster_dists.pop(pair[0]), cluster_dists.pop(pair[1]))
+            pair = heap.pop()
+            #print (cluster_indices, pair)
 
-        cluster_dists[pair[0]] = new_dists
-        for other, dist in new_dists.items():
-            cluster_dists[other][pair[0]] = dist
+            cluster_dist = cluster_dists[pair[0]][pair[1]]
+            if cluster_dist > threshold:
+                # this is the min pair, so no more pairs will be less
+                # than the thresh
+                break
 
-        # updating clusters, all reads in cluster pair[1] join pair[0]
+            #debug ('Merging ', pair, cluster_dists[pair[0]][pair[1]])
 
-        cluster_indices[clusters[pair[1]]] = pair[0]
+            for other in cluster_dists[pair[0]].keys():
+                del cluster_dists[other][pair[0]]
+                if other != pair[1]:
+                    cur_pair = (pair[0], other) if other > pair[0] else (other, pair[0])
+                    #print ('removing', cur_pair)
+                    heap.remove(cur_pair)
+            for other in cluster_dists[pair[1]].keys():
+                del cluster_dists[other][pair[1]]
+                if other != pair[0]:
+                    cur_pair = (pair[1], other) if other > pair[1] else (other, pair[1])
+                    #print ('removing', cur_pair)
+                    heap.remove(cur_pair)
 
-        clusters[pair[0]].extend(clusters[pair[1]])
-        clusters[pair[1]] = []
+            new_dists = merge_dists_func(pair[0], pair[1], cluster_dists.pop(pair[0]), cluster_dists.pop(pair[1]))
+
+            cluster_dists[pair[0]] = new_dists
+            for other, dist in new_dists.items():
+                cluster_dists[other][pair[0]] = dist
+                cur_pair = (pair[0], other) if other > pair[0] else (other, pair[0])
+                heap.push(cur_pair, dist)
+
+            # updating clusters, all reads in cluster pair[1] join pair[0]
+
+            cluster_indices[clusters[pair[1]]] = pair[0]
+
+            clusters[pair[0]].extend(clusters[pair[1]])
+            clusters[pair[1]] = []
+
 
 
     """
