@@ -1010,6 +1010,9 @@ def cluster_reads(distance_matrix,
             debug=True,
             progress=False):
 
+    if linkage == 'min':
+        return _cluster_reads_linkage_min(distance_matrix, threshold, debug, progress)
+
     debug, progress = utils.log_env(debug, progress)
     cluster_dists = {}
     num_reads = 0
@@ -1232,4 +1235,27 @@ def cluster_reads(distance_matrix,
 
     return cluster_indices
 
+
+def _cluster_reads_linkage_min(distance_matrix,
+            threshold=0.2,
+            debug=True,
+            progress=False):
+    """ Cluster reads using the min linkage. This method is separate
+    because the min linkage allows for a much more efficient algorithm
+    """
+    debug, progress = utils.log_env(debug, progress)
+
+    num_reads = max(max(pair) for pair in distance_matrix) + 1
+
+    clusters = np.arange(num_reads)
+
+    for pair, dist in progress(distance_matrix.items()):
+        if dist <= threshold:
+            clusters[pair[1]] = clusters[pair[0]]
+
+    mapping = {}
+    for i in range(num_reads):
+        clusters[i] = mapping.setdefault(clusters[i], len(clusters))
+
+    return clusters
 
