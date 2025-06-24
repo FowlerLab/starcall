@@ -63,6 +63,57 @@ def dot_filter(image, major_axis=4, minor_axis=0.5, copy=True):
 
     return image
 
+def dot_filter2(image, small_radius=2, large_radius=4, copy=True):
+    if copy:
+        image = image.copy()
+
+    orig_shape = image.shape
+    image = image.reshape(-1, *orig_shape[2:])
+
+    #large_footprint = skimage.morphology.disk(large_radius)
+    #small_footprint = skimage.morphology.disk(small_radius)
+    #diff = large_radius - small_radius
+    #large_footprint[diff:-diff,diff:-diff] &= ~small_footprint.astype(bool)
+    footprint = skimage.morphology.disk(large_radius)
+    print (footprint)
+
+    for i in range(image.shape[0]):
+        #background = skimage.morphology.dilation(image[i], footprint)
+        #background[i] = skimage.filters.gaussian(background[i], kernel_size)
+        #image[i] -= background
+        image[i] = skimage.morphology.white_tophat(image[i], footprint)
+
+    image = image.reshape(orig_shape)
+
+    np.clip(image, 0, None, out=image)
+
+    return image
+
+def dot_filter_new(image, large_sigma=4, copy=True):
+    if copy:
+        image = image.copy()
+
+    og_shape = image.shape
+    if len(image.shape) == 3:
+        image = image.reshape((1,) + image.shape)
+
+    #image -= image.mean(axis=(2,3)).reshape(image.shape[0], image.shape[1],1,1)
+    #image /= image.std(axis=(2,3)).reshape(image.shape[0], image.shape[1],1,1)
+    #image -= image.mean(axis=(0,2,3)).reshape(1,-1,1,1)
+    #image /= image.std(axis=(0,2,3)).reshape(1,-1,1,1)
+    #np.clip(image, 0, None, out=image)
+    
+    for i in range(image.shape[0]):
+        image[i] -= skimage.filters.gaussian(image[i], large_sigma, channel_axis=0)
+        #for j in range(image.shape[1]):
+            #image[i,j] = scipy.ndimage.gaussian_laplace(image[i,j], large_sigma)
+    #np.clip(image, 0, None, out=image)
+
+    image -= image.mean(axis=(2,3)).reshape(image.shape[0], image.shape[1],1,1)
+    image /= image.std(axis=(2,3)).reshape(image.shape[0], image.shape[1],1,1)
+
+    return image.reshape(og_shape)
+
 def dot_filter_old(image, large_sigma=4, copy=True):
     if copy:
         image = image.copy()
@@ -83,7 +134,7 @@ def dot_filter_old(image, large_sigma=4, copy=True):
 
     return image.reshape(og_shape)
 
-def dot_filter2(image, kernel_size=10):
+def dot_filter2_old(image, kernel_size=10):
     og_shape = image.shape
     if len(image.shape) == 3:
         image = image.reshape((1,) + image.shape)
@@ -158,7 +209,9 @@ def detect_dots(image,
 
     if copy: image = image.copy()
 
-    filtered = dot_filter(image, major_axis=4, minor_axis=0.5, copy=False)
+    filtered = dot_filter_new(image, large_sigma=4, copy=False)
+    #filtered = dot_filter_old(image, large_sigma=4, copy=False)
+    #filtered = dot_filter(image, major_axis=4, minor_axis=0.5, copy=False)
     #tifffile.imwrite('tmp_dot_filter_filtered_12.tif', filtered)
     greyimage = highlight_dots(filtered.copy())
     #tifffile.imwrite('tmp_dot_greyimage.tif', greyimage)
@@ -185,7 +238,7 @@ def detect_dots(image,
     #print (np.percentile(values, 99, axis=0))
     #print (np.mean(values, axis=0))
     #print (values.min(axis=0), values.max(axis=0))
-    values /= np.maximum(0.00000001, np.percentile(values, 75, axis=0)[None,:,:])
+    #values /= np.maximum(0.00000001, np.percentile(values, 75, axis=0)[None,:,:])
     #print (np.percentile(values, 75, axis=0))
     #print (np.percentile(values, 99, axis=0))
     #print (np.mean(values, axis=0))

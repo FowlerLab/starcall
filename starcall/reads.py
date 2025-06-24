@@ -387,7 +387,7 @@ class ReadSet:
     """
 
     def __getitem__(self, index):
-        if type(index) == slice:
+        if isinstance(index, slice):
             return ReadSet(
                 positions = self.positions[index] if self.positions is not None else None,
                 values = self.values[index] if self.values is not None else None,
@@ -688,10 +688,10 @@ class ReadSetGroups:
         """
 
     def head(self, max_reads):
-        return ReadSetGroups([readset[:max_reads] for readset in self.groups])
+        return ReadSetGroups([readset[:max_reads] for readset in self.groups], grouped_by=self.grouped_by)
 
     def tail(self, max_reads):
-        return ReadSetGroups([readset[-max_reads:] for readset in self.groups])
+        return ReadSetGroups([readset[-max_reads:] for readset in self.groups], grouped_by=self.grouped_by)
 
     def nth(self, index):
         return ReadSet([readset[index] for readset in self.groups])
@@ -1255,7 +1255,7 @@ def _cluster_reads_linkage_min(distance_matrix,
 
     mapping = {}
     for i in range(num_reads):
-        clusters[i] = mapping.setdefault(clusters[i], len(clusters))
+        clusters[i] = mapping.setdefault(clusters[i], len(mapping))
 
     return clusters
 

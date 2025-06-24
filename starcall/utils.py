@@ -272,7 +272,7 @@ def read_multicolumn(table, name, length_column=None):
 
         array = []
         for i in range(len(lengths.index)):
-            row = [columns[j].iloc[i] for j in range(lengths.iloc[i])]
+            row = [columns[j].iloc[i] for j in range(min(lengths.iloc[i], len(columns)))]
             array.append(row)
 
         return array
