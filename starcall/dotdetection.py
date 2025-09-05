@@ -209,7 +209,7 @@ def detect_dots(image,
 
     if copy: image = image.copy()
 
-    filtered = dot_filter_new(image, large_sigma=4, copy=False)
+    filtered = dot_filter_new(image, large_sigma=max_sigma, copy=False)
     #filtered = dot_filter_old(image, large_sigma=4, copy=False)
     #filtered = dot_filter(image, major_axis=4, minor_axis=0.5, copy=False)
     #tifffile.imwrite('tmp_dot_filter_filtered_12.tif', filtered)

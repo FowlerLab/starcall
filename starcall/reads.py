@@ -446,13 +446,20 @@ class ReadSet:
         self.values = values
 
     def groupby(self, colname, sort_key=None):
+        """ Separate this read set into multiple sets, each for every
+        unique value of a given attribute
+        """
         groups = {}
         for label, read in zip(self.attrs[colname], self):
             groups.setdefault(label, []).append(read)
         
         if sort_key:
-            for label in groups.keys():
-                groups[label] = ReadSet(sorted(groups[label], key=sort_key))
+            if isinstance(sort_key, str):
+                for label in groups.keys():
+                    groups[label] = ReadSet(sorted(groups[label], key=lambda read: read.attrs[sort_key]))
+            else:
+                for label in groups.keys():
+                    groups[label] = ReadSet(sorted(groups[label], key=sort_key))
         else:
             for label in groups.keys():
                 groups[label] = ReadSet(groups[label])
