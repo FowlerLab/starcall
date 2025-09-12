@@ -11,6 +11,8 @@ import numpy as np
 import collections.abc
 import itertools
 import sklearn.neighbors
+import skimage.measure
+import scipy.ndimage
 import heapq
 import time
 
