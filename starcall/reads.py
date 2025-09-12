@@ -1,23 +1,22 @@
-""" Classes that encapsulate sequencing reads detected in
-images, with attributes and functions to manipulate and
-process them.
+""" Classes and functions to store and process the
+short reads that are generated from in situ sequencing.
+
+Reads are stored as the Read dataclass and in pandas dataframes.
 """
 
-import re
-import time
-import itertools
-import heapq
-import numpy as np
-import csv
 import pandas
-import scipy.ndimage
-import matplotlib.pyplot as plt
+import dataclasses
+from typing import Optional
+import numpy as np
+import collections.abc
+import itertools
 import sklearn.neighbors
-import skimage.measure
+import heapq
+import time
 
 from . import utils
 
-class Read:
+class Read(collections.abc.Mapping):
     """ A sequencing read found in an image. Can be constructed with
     a position and the image or with a position and the values
     from that position.
@@ -40,15 +39,20 @@ class Read:
         is not specified when creating the Read it is inferred from the values, by taking
         the maximum channel for each cycle.
 
-    Additional attributes can be added when creating the Read as keyword arguments, and can be accessed as
-    normal attributes on the Read.
+    Additional attributes can be added when creating the Read as keyword arguments, and can be accessed as if
+    the read is a dictionary
     """
 
-    DEFAULT_CHANNELS = np.array(['G', 'T', 'A', 'C'], dtype='U1')
+    #position: Optional[tuple]
+    #values: Optional[np.ndarray]
+    #sequence: Optional[str]
+    #channels: tuple
+    #attrs: Optional[dict]
+
+    DEFAULT_CHANNELS = ('G', 'T', 'A', 'C')
 
     def __init__(self, position=None, values=None, sequence=None, image=None, channels=None, **kwargs):
         """ 
-        Read(position, values, [sequence, 
         """
         if isinstance(position, str):
             sequence = position
@@ -56,7 +60,7 @@ class Read:
 
         if position is not None:
             position = np.asarray(position)
-            if values is None and image is None and position.shape != (2,):
+            if values is None and image is None and len(position) != 2:
                 values = position
                 position = None
 
@@ -66,7 +70,7 @@ class Read:
         if values is None and image is not None and position is not None:
             values = image[:,:,position[0],position[1]]
 
-        channels = np.asarray(channels, dtype='U1') if channels is not None else self.DEFAULT_CHANNELS
+        channels = channels if channels is not None else self.DEFAULT_CHANNELS
 
         if values is not None:
             values = np.asarray(values)
@@ -90,28 +94,7 @@ class Read:
         self.values = values
         self._sequence = sequence
         self.channels = channels
-        self.n_channels = len(channels)
-        self._attrs = {name: np.asarray(val).reshape(-1) for name, val in kwargs.items()}
-
-    def __repr__(self):
-        parts = []
-
-        if self.position is not None:
-            parts.append('position={}'.format(self.position))
-        if self.values is not None:
-            parts.append('values=[...]')
-        parts.append(self.sequence)
-
-        for name, val in self._attrs.items():
-            parts.append('{}={}'.format(name, val[0]))
-
-        return 'Read({})'.format(', '.join(parts))
-
-    @staticmethod
-    def asread(obj):
-        if isinstance(obj, Read):
-            return obj
-        return Read(obj)
+        self.attrs = kwargs
 
     @property
     def sequence(self):
@@ -153,279 +136,384 @@ class Read:
     def qualities(self):
         return self.values.max(axis=1)
 
-    @property
-    def attrs(self):
-        return ReadAttrs(self._attrs)
+    def __repr__(self):
+        parts = []
 
-    """
-    def __getattr__(self, name):
-        if name in self._attrs:
-            return self._attrs[name]
-        raise AttributeError("type object '{}' has no attribute '{}'".format(type(self).__name__, name))
-    """
+        if self.position is not None:
+            parts.append('position={}'.format(self.position))
+        if self.values is not None:
+            parts.append('values=[...]')
+        parts.append(str(self.sequence))
 
-class ReadAttrs:
-    def __init__(self, attrs):
-        self.attrs = attrs
+        for name, val in self.attrs.items():
+            parts.append('{}={}'.format(name, val))
 
-    def __getitem__(self, index):
-        return self.attrs[index][0]
+        return 'Read({})'.format(', '.join(parts))
 
-    def __setitem__(self, index, value):
-        self.attrs[index][0] = value
+    def __str__(self):
+        return self.__repr__()
 
     def __iter__(self):
-        return iter(self.attrs)
+        if self.position is not None:
+            yield 'position_x'
+            yield 'position_y'
 
-    def keys(self):
-        return self.attrs.keys()
+        if self.values is not None:
+            for cycle in range(self.values.shape[0]):
+                for chan in self.channels:
+                    yield 'values_cycle{:02}_{}'.format(cycle, chan)
 
-    def values(self):
-        for val in self.attrs.values():
-            yield val[0]
+        if self.sequence is not None:
+            yield 'sequence'
 
-    def items(self):
-        for key, val in self.attrs.items():
-            yield key, val[0]
+        for key in self.attrs:
+            yield key
+
+    def __getitem__(self, name):
+        value = self.attrs.get(name, None)
+        if value is not None:
+            return value
+
+        if name == 'position_x':
+            return self.position[0]
+        if name == 'position_y':
+            return self.position[1]
+
+        if name[:12] == 'values_cycle':
+            splitindex = name.rfind('_')
+            cycleno = int(name[12:splitindex])
+            chan = self.channels.index(name[splitindex+1:])
+            return self.values[cycleno,chan]
+
+        if name == 'sequence':
+            return self.sequence
+
+    def __setitem__(self, name):
+        if name == 'position_x':
+            self.position = (value, self.position[1])
+            return
+        if name == 'position_y':
+            self.position = (self.position[0], value)
+            return
+
+        if name[:12] == 'values_cycle':
+            splitindex = name.rfind('_')
+            cycleno = int(name[12:splitindex])
+            chan = self.channels.index(name[splitindex+1:])
+            self.values[cycleno,chan] = value
+            return
+
+        if name == 'sequence':
+            self.sequence = value
+            return
+
+        self.attrs[name] = value
 
     def __len__(self):
-        return len(self.attrs)
+        count = 0
 
+        if self.position is not None:
+            count += 2
+        if self.values is not None:
+            count += self.values.size
+        if self.sequence is not None:
+            count += 1
 
-
-class ReadSet:
-    """ A collection of reads, all with the same number of cycles and
-    channels. This can be constructed from the raw values, an image and positions,
-    a list of sequences, or a combination of any. A common way to generate a read set
-    is with the starcall.dotdetection.find_dots function, which detects and extracts reads
-    from an image.
-
-    ReadSet instances have similar attributes to individual Read objects, and similar to Read
-    objects some can be None. When Reads are collected into a ReadSet, they are all required to
-    have the same attributes.
-
-        positions (ndarray of shape (n_reads, 2)): The positions of every read
-        values (ndarray of shape (n_reads, n_cycles, n_channels): the raw values from the sequencing images for all reads
-        sequences (ndarray of strings of shape (n_reads,)): The sequences of each read
-        ** any extra attributes that were specified on creation
-
-    Examples:
-    
-    Creating a ReadSet with just sequences:
-        readset = ReadSet(['GTAC', 'GTGT', 'GGTT', 'GTAG', 'TTGT', 'ATAA'])
-        readset = ReadSet(sequences=['GTAC', 'GTGT', 'GGTT', 'GTAG', 'TTGT', 'ATAA'])
-        readset[0] # -> Read('GTAC')
-        readset.sequences # -> np.array(['GTAC', 'GTGT', 'GGTT', 'GTAG', 'TTGT', 'ATAA'])
-
-    Creating a ReadSet from a sequence of Reads:
-        readset = ReadSet([Read('GTTT'), Read('TGTT'), Read('AAAT')])
-        readset = ReadSet(reads=[Read('GTTT'), Read('TGTT'), Read('AAAT')])
-        readset[0] # -> Read('GTAC')
-        readset.sequences # -> np.array(['GTTT', 'TGTT', 'AAAT'])
-
-    Creating a ReadSet with positions and values:
-        readset = ReadSet(
-            [(0,0), (0,5), (10, 14)],
-            [
-                [(1,0,0,0), (0,1,0,2), (0,3,2,1), (1,2,1,1)],
-                [(1,1,0,2), (3,2,2,1), (1,0,1,2), (3,3,1,8)],
-                [(1,1,0,2), (0,1,0,2), (4,0,0,2), (1,2,1,5)],
-            ]
-        )
-        readset[0].values # -> np.array([[1,0,0,0], [0,1,0,2], [0,3,2,1], [1,2,1,1]])
-        readset.sequences # -> 
-
-    Creating a ReadSet with extra parameters:
-        readset = ReadSet(sequences=['GTTT', 'AGAG', 'TGTT'], cell=[0, 1, 0], count=[1, 4, 2])
-        readset.cell # -> np.array([0, 1, 0])
-        readset[0].cell # -> 0
-
-    """
-
-    def __init__(self, positions=None, values=None, sequences=None, image=None, channels=None, reads=None, **attrs):
-        positions = np.asarray(positions) if positions is not None else None
-
-        if positions is not None and isinstance(positions[0], Read):
-            # a sequence of reads is passed in
-            reads = list(map(Read.asread, positions))
-            positions = None
-            self.n_reads = len(reads)
-
-            if reads[0].position is not None:
-                positions = np.array([read.position for read in reads])
-                for i in range(self.n_reads):
-                    reads[i].position = positions[i]
-
-            if reads[0].values is not None:
-                values = np.array([read.values for read in reads])
-                for i in range(self.n_reads):
-                    reads[i].values = values[i]
-
-            if reads[0]._sequence is not None:
-                sequences = np.array([read._sequence[0] for read in reads])
-                for i in range(self.n_reads):
-                    reads[i]._sequence = sequences[i:i+1]
-
-            for name in reads[0].attrs:
-                attrs[name] = np.array([read._attrs[name][0] for read in reads])
-                for i in range(self.n_reads):
-                    reads[i].attrs[name] = attrs[name][i:i+1]
-
-            channels = reads[0].channels
-
-        if positions is not None and sequences is None and positions.dtype.kind == 'U':
-            sequences = positions
-            positions = None
-
-        if positions is not None and values is None and image is None and len(positions.shape) == 3:
-            values = positions
-            positions = None
-
-        if values is None and (positions is None or image is None) and sequences is None:
-            raise ValueError("Either values, sequences, or both positions and image must be specified")
-
-        if values is None and image is not None and positions is not None:
-            values = image[:,:,positions[:,0],positions[:,1]]
-            values = values.transpose(2,0,1)
-
-        channels = np.asarray(channels, dtype='U1') if channels is not None else Read.DEFAULT_CHANNELS
-
-        if values is not None:
-            values = np.asarray(values)
-
-            if sequences is None and values.dtype.kind == 'U':
-                sequences = values
-                values = None
-            else:
-                if len(values.shape) != 3 or values.shape[2] != len(channels):
-                    raise ValueError("Expected an array of shape (n_reads, n_cycles, n_channels) for values")
-                self.n_reads = values.shape[0]
-                self.n_cycles = values.shape[1]
-
-        if sequences is not None:
-            sequences = np.asarray(sequences, dtype='U')
-            self.n_reads = sequences.shape[0]
-            self.n_cycles = int(str(sequences.dtype).split('U')[-1])
-
-        for name in attrs:
-            attrs[name] = np.asarray(attrs[name])
-
-        if reads is None:
-            reads = []
-            for i in range(self.n_reads):
-                reads.append(Read(
-                    position = positions[i] if positions is not None else None,
-                    values = values[i] if values is not None else None,
-                    sequence = sequences[i:i+1] if sequences is not None else None,
-                    channels = channels,
-                    **{name: vals[i:i+1] for name, vals in attrs.items()}
-                ))
-
-        self.reads = reads
-        self.positions = positions
-        self.values = values
-        self._sequences = sequences
-        self.channels = channels
-        self.n_channels = len(channels)
-        self.attrs = attrs
-
-    def __repr__(self):
-        if len(self) > 8:
-            items = self.reads[:4] + ['\n\t...'] + self.reads[-4:]
-        else:
-            items = self.reads
-        return 'ReadSet([{}])'.format(', '.join(str(read) for read in items))
+        return count + len(self.attrs)
 
     @staticmethod
-    def asreads(obj):
-        if isinstance(obj, ReadSet):
+    def asread(obj):
+        if isinstance(obj, Read):
             return obj
-        return ReadSet(obj)
+        return Read(obj)
 
-    @property
-    def sequences(self):
-        if self._sequences is not None:
-            return self._sequences
-        seq = self.channels[np.argmax(self.values, axis=2)]
-        seq = np.frombuffer(seq, 'U' + str(seq.shape[1]))
-        seq.setflags(write=False)
-        return seq
+def make_readset(positions=None, values=None, sequences=None, image=None, channels=None, **kwargs):
+    tables = []
 
-    @sequences.setter
-    def sequences(self, value):
-        if self._sequences is None:
-            self._sequences = np.empty(self.n_reads, 'U' + str(self.n_cycles))
-        self._sequences[...] = value
+    if positions is not None:
+        if values is None and sequences is None and image is None:
+            # only one argument, must be iterable of Read instances or sequences
+            for read in positions:
+                if type(read) == str:
+                    table.setdefault('sequence', []).append(read)
+                else:
+                    print (read)
+                    print (type(read))
+                    kdsfls
 
-    @property
-    def sequences_array(self):
-        if self._sequences is not None:
-            seq = np.frombuffer(self._sequences, 'U1').reshape(self.n_reads, self.n_cycles)
-            return seq
+            return pandas.DataFrame(table)
 
-        seq = self.channels[np.argmax(self.values, axis=2)]
-        seq.setflags(write=False)
-        return seq
+        positions = np.asarray(positions)
+        table = pandas.DataFrame(positions, columns=['position_x', 'position_y'])
+        tables.append(table)
 
-    @sequences_array.setter
-    def sequences_array(self, value):
-        if self._sequences is None:
-            self._sequences = np.empty(self.n_reads, 'U' + str(self.n_cycles))
+    if values is None and (positions is None or image is None) and sequences is None:
+        raise ValueError("Either values, sequence, or both position and image must be specified")
 
-        seq = np.frombuffer(self._sequences, 'U1').reshape(self.n_reads, self.n_cycles)
-        seq[...] = value
+    if values is None and image is not None and position is not None:
+        values = image[:,:,position[:,0],position[:,1]]
 
-    @property
-    def qualities(self):
-        return self.values.max(axis=2)
+    channels = channels if channels is not None else Read.DEFAULT_CHANNELS
 
+    if values is not None:
+        values = np.asarray(values)
+
+        columns = []
+        for cycle in range(values.shape[1]):
+            for chan in range(values.shape[2]):
+                colname = 'values_cycle{:02}_{}'.format(cycle, channels[chan])
+                columns.append(colname)
+
+        table = pandas.DataFrame(values.reshape(values.shape[0], -1), columns=columns)
+        tables.append(table)
+
+    if sequences is not None:
+        sequences = np.asarray(sequences, dtype='U')
+        table = pandas.DataFrame(sequences, columns=['sequence'])
+        tables.append(table)
+
+    if len(kwargs) != 0:
+        tables.append(pandas.DataFrame(kwargs))
+
+    table = pandas.concat(tables, axis=1)
+    return table
+
+
+def join_contiguous_arrays(arrays):
+    assert all(arr.base is arrays[0].base for arr in arrays)
+    assert all(arr.shape == arrays[0].shape for arr in arrays)
+    assert all(arr.strides == arrays[0].strides for arr in arrays)
+    assert arrays[0].ndim == 1
+
+    pointers = [arr.__array_interface__['data'][0] for arr in arrays]
+    stride = pointers[1] - pointers[0]
+    offset = pointers[0] - arrays[0].base.__array_interface__['data'][0]
+    assert all(end - begin == stride for begin, end in zip(pointers, pointers[1:]))
+
+    print (offset, stride)
+
+    return np.ndarray(
+        shape = (len(arrays), arrays[0].shape[0]),
+        dtype = arrays[0].dtype,
+        buffer = arrays[0].base,
+        offset = offset,
+        strides = (stride, arrays[0].strides[0])
+    )
+
+
+
+
+@pandas.api.extensions.register_dataframe_accessor("reads")
+class ReadsAccessor:
+    """ Accessor object to provide attributes and functions for
+    dataframes containing in situ sequencing reads
     """
-    def __getattr__(self, name):
-        if name in self.attrs:
-            return self.attrs[name]
-        raise AttributeError("type object '{}' has no attribute '{}'".format(type(self).__name__, name))
-    """
+    def __init__(self, table):
+        self.channels = []
+        self.num_cycles = 0
+        self.attrs = []
+
+        self.has_position = False
+        self.has_values = False
+        self.has_sequence = False
+
+        index = 0
+
+        while index < len(table.columns):
+            if table.columns[index] == 'position_x':
+                if table.columns[index+1] != 'position_y':
+                    raise AttributeError('DataFrame has column \'position_x\' but not \'position_y\'. '
+                            'Both columns must be adjacent, to ensure correct order use starcall.reads.make_readset()')
+                self.has_position = True
+                index += 2
+
+            elif table.columns[index][:12] == 'values_cycle':
+                self.has_values = True
+
+                if table.columns[index][12:-1] != '00_':
+                            raise AttributeError('Expected value columns to be in format \'values_cycle{cycle:02}_{channel}\' '
+                                    'in sequential order. To ensure correct order use starcall.reads.make_readset()')
+
+                start_index = index
+                while index < len(table.columns) and table.columns[index][:-1] == 'values_cycle00_':
+                    self.channels.append(table.columns[index][-1])
+                    index += 1
+
+                self.num_cycles = 1
+
+                while index < len(table.columns) and table.columns[index][:12] == 'values_cycle':
+                    for chan in self.channels:
+                        if index >= len(table.columns) or table.columns[index] != 'values_cycle{:02}_{}'.format(self.num_cycles, chan):
+                            raise AttributeError('Expected value columns to be in format \'values_cycle{cycle:02}_{channel}\' '
+                                    'in sequential order. To ensure correct order use starcall.reads.make_readset()')
+                        index += 1
+                    self.num_cycles += 1
+
+            elif table.columns[index] == 'sequence':
+                self.has_sequence = True
+                index += 1
+
+            else:
+                self.attrs.append(table.columns[index])
+                index += 1
+
+        if self.has_values:
+            self.channels = tuple(self.channels)
+        else:
+            if not self.has_sequence:
+                raise AttributeError('Either values or sequences must be included in a table')
+
+            self.channels = Read.DEFAULT_CHANNELS
+            self.num_cycles = len(table['sequence'].iloc[0]) if len(table.index) > 0 else 0
+
+        self.table = table
 
     def __getitem__(self, index):
-        if isinstance(index, slice):
-            return ReadSet(
-                positions = self.positions[index] if self.positions is not None else None,
-                values = self.values[index] if self.values is not None else None,
-                sequences = self._sequences[index] if self._sequences is not None else None,
-                channels = self.channels,
-                reads = self.reads[index],
-                **{name: vals[index] for name, vals in self.attrs.items()}
-            )
-        #return self.reads[index]
-        return Read(
-            position = self.positions[index] if self.positions is not None else None,
-            values = self.values[index] if self.values is not None else None,
-            sequence = self._sequences[index:index+1] if self._sequences is not None else None,
-            channels = self.channels,
-            **{name: vals[index:index+1] for name, vals in self.attrs.items()}
-        )
+        #row = self.table.loc[index]
+        index = self.table.index.get_loc(index)
+        position, values, sequence = None, None, None
 
-    def __iter__(self):
-        for i in range(self.n_reads):
-            yield self[i]
+        if self.has_position:
+            position = self.position[index,:]
 
-    #def __contains__(self, value):
-        #return value in self.reads
+        if self.has_values:
+            values = self.values[index,:]
+
+        if self.has_sequence:
+            sequence = self.sequence[index]
+
+        attrs = {name: self.table[name].iloc[index] for name in self.attrs}
+
+        read =  Read(position=position, values=values, sequence=sequence, **attrs)
+        return read
+
+        if 'position_x' in self.table.columns:
+            position = row['position_x'], row['position_y']
+
+        value_col_names = [col for col in self.table.columns if col[:12] == 'values_cycle']
+        if len(value_col_names) != 0:
+            first_cycle_name = value_col_names[0][:value_col_names[0].rfind('_')]
+            num_channels = sum(col[:len(first_cycle_name)] == first_cycle_name for col in value_col_names)
+            values = row.loc[value_col_names[0]:value_col_names[-1]].to_numpy()
+            values = values.reshape(-1, num_channels)
+
+        if 'sequence' in self.table.columns:
+            sequence = row.loc['sequence':'sequence'].to_numpy()
+
+        return Read(position=position, values=values, sequence=sequence)
 
     def __len__(self):
-        return self.n_reads
+        return len(self.table.index)
 
-    def copy(self, copy_arrays=True):
-        positions, values, sequences = self.positions, self.values, self._sequences
+    def __iter__(self):
+        return iter(self[i] for i in self.table.index)
 
-        if copy_arrays and positions is not None:
-            positions = positions.copy()
-        if copy_arrays and values is not None:
-            values = values.copy()
-        if copy_arrays and sequences is not None:
-            sequences = sequences.copy()
+    @property
+    def position(self):
+        if 'position_x' in self.table.columns:
+            col1 = self.table.loc[:,'position_x'].to_numpy()
+            col2 = self.table.loc[:,'position_y'].to_numpy()
 
-        return ReadSet(positions=positions, values=values, sequences=sequences, channels=channels)
+            full = col1.base
+            offset = col1.__array_interface__['data'][0] - full.__array_interface__['data'][0]
+            stride = col2.__array_interface__['data'][0] - col1.__array_interface__['data'][0]
+
+            arr = np.ndarray((2, col1.shape[0]), col1.dtype, full, offset, (stride, col1.strides[0]))
+            return arr.T
+
+            if full.ndim == 1 or full.shape[0] < 2:
+                raise AttributeError('The columns for a read set must be in a specific order, '
+                        'use starcall.reads.make_readset() to reorder')
+            return full.T
+        return None
+
+    @property
+    def values(self):
+        if self.has_values:
+            colname1 = 'values_cycle00_{}'.format(self.channels[0])
+            colname2 = 'values_cycle00_{}'.format(self.channels[1])
+
+            col2 = self.table.loc[:,colname2].to_numpy()
+            col1 = self.table.loc[:,colname1].to_numpy()
+
+            full = col1.base
+            offset = col1.__array_interface__['data'][0] - full.__array_interface__['data'][0]
+            stride = col2.__array_interface__['data'][0] - col1.__array_interface__['data'][0]
+
+            arr = np.ndarray((self.num_cycles * len(self.channels), col1.shape[0]), col1.dtype, full, offset, (stride, col1.strides[0]))
+            arr = arr.T
+            arr.shape = (len(self.table.index), self.num_cycles, len(self.channels))
+            return arr
+
+            if full.ndim == 1 or full.shape[0] < self.num_cycles * len(self.channels):
+                raise AttributeError('The columns for a read set must be in a specific order, '
+                        'use starcall.reads.make_readset() to reorder')
+            full = full.T
+            full.shape = (full.shape[0], -1, len(self.channels))
+            return full
+        return None
+
+    @property
+    def sequence(self):
+        if 'sequence' in self.table.columns:
+            return self.table['sequence'].to_numpy().astype('U')
+
+        values = self.values
+        indices = np.argmax(values, axis=2)
+        sequences = np.array(self.channels, dtype='U1')[indices]
+        sequences = np.frombuffer(sequences, 'U' + str(sequences.shape[1]))
+        return sequences
+
+    @property
+    def sequence_array(self):
+        sequences = self.sequence
+        sequences = np.frombuffer(sequences, 'U1').reshape(len(self.table.index), -1)
+        return sequences
+
+    def to_cell_table(self, cell_column='cell', include_attrs=['count']):
+        include_attrs = [name for name in include_attrs if name in self.table.columns]
+
+        seq_table = {'index': self.table.index, 'sequence': self.sequence, cell_column: self.table[cell_column]}
+        for name in include_attrs:
+            seq_table[name] = self.table[name]
+
+        seq_table = pandas.DataFrame(seq_table)
+
+        groups = seq_table.groupby(cell_column)
+        max_size = groups.size().max()
+
+        cell_index = pandas.Index(groups.groups.keys())
+        tables = []
+        for i in range(max_size):
+            new_table = groups.nth(i)
+            new_table = pandas.DataFrame(new_table, index=cell_index)
+            new_table['index'] = new_table['index'].fillna(-1).astype(int)
+            if 'count' in include_attrs:
+                new_table['count'] = new_table['count'].fillna(0).astype(int)
+
+            renames = {'index': 'index_{}'.format(i), 'sequence': 'read_{}'.format(i)}
+            for name in include_attrs:
+                renames[name] = name + '_{}'.format(i)
+
+            new_table = new_table.rename(columns=renames)
+            tables.append(new_table)
+
+        return pandas.concat(tables, axis=1)
+
+    def aggfuncs(self, position=None, values=None, **kwargs):
+        aggs = {}
+        if position is not None:
+            aggs['position_x'] = position
+            aggs['position_y'] = position
+
+        if values is not None:
+            for cycle in range(self.num_cycles):
+                for chan in self.channels:
+                    aggs['values_cycle{:02}_{}'.format(cycle,chan)] = values
+
+        aggs.update(kwargs)
+        aggs = {name: pandas.NamedAgg(column=name, aggfunc=val) for name, val in aggs.items()}
+        return aggs
 
     def normalize(self, method='full'):
         """ Normalizes the values of this read set, based on the method specified
@@ -436,415 +524,19 @@ class ReadSet:
         values = self.values
 
         if method == 'large':
-            values /= np.maximum(1, np.linalg.norm(values, axis=2)[:,:,None])
+            norms = np.linalg.norm(values, axis=2)
+            np.maximum(1, norms, out=norms)
+            values /= norms[:,:,None]
         if method == 'full':
-            values /= np.maximum(0.0000000001, np.linalg.norm(values, axis=2)[:,:,None])
+            norms = np.linalg.norm(values, axis=2)
+            np.maximum(0.0000000001,  norms, out=norms)
+            values /= norms[:,:,None]
         if method == 'sub':
             sorted_values = np.sort(values, axis=2)
             values -= sorted_values[:,:,-2:-1]
 
-        self.values = values
-
-    def groupby(self, colname, sort_key=None):
-        """ Separate this read set into multiple sets, each for every
-        unique value of a given attribute
-        """
-        groups = {}
-        for label, read in zip(self.attrs[colname], self):
-            groups.setdefault(label, []).append(read)
-        
-        if sort_key:
-            if isinstance(sort_key, str):
-                for label in groups.keys():
-                    groups[label] = ReadSet(sorted(groups[label], key=lambda read: read.attrs[sort_key]))
-            else:
-                for label in groups.keys():
-                    groups[label] = ReadSet(sorted(groups[label], key=sort_key))
-        else:
-            for label in groups.keys():
-                groups[label] = ReadSet(groups[label])
-
-        return ReadSetGroups(list(groups.values()), grouped_by=colname)
-
-    def combine(self, method=None):
-        """ Combines all reads in this set into one consensus read. The different attributes
-        of reads are combined in different ways:
-            positions are averaged
-            values are summed
-            sequences, the mode is selected
-            ** any custom attributes are combined as specified
-            by the parameter method.
-
-        Args:
-            method (dict): Methods to use to aggregate custom attributes on reads
-                Each entry in the dict specifies the aggregation method for the attribute,
-                from the list, out of: 'mean', 'min', 'max', 'sum', 'mode'. A callable
-                can also be passed which will take a numpy array and return a scalar.
-        Returns:
-            Read instance, the consensus read of this set.
-        """
-
-        position, values, sequence = None, None, None
-
-        def mode(arr):
-            vals, counts = np.unique(arr, return_counts=True)
-            return vals[np.argmax(counts)]
-
-        if self.positions is not None:
-            position = self.positions.mean(axis=0)
-        if self.values is not None:
-            values = self.values.sum(axis=0)
-        if self._sequences is not None:
-            sequence = mode(self._sequences)
-
-        def get_method(method):
-            if method is None:
-                method = default_method
-
-            if callable(method):
-                return method
-
-            if method == 'mode':
-                return mode
-            if hasattr(np, method):
-                return getattr(np, method)
-
-            raise ValueError('Unrecognized aggregation method {}'.format(method))
-
-        attrs = {}
-        for name, attr_vals in self.attrs.items():
-            default_method = 'mean' if np.issubdtype(attr_vals.dtype, np.floating) else 'mode'
-            cur_method = method.get(name, default_method) if isinstance(method, dict) else method
-            cur_method = get_method(cur_method)
-            attrs[name] = cur_method(attr_vals)
-
-        read = Read(position=position, values=values, sequence=sequence, channels=self.channels, **attrs)
-        return read
-
-    def to_table(self, sequences=None, qualities=False):
-        """ Converts this collection of reads into a pandas DataFrame. This can be converted
-        back into a ReadSet using ReadSet.from_table
-
-            sequences (bool, default (self._sequences is None)): Whether to include sequences in the table.
-                Defaults to whether sequences have been specified for this read set
-            qualities (bool, default False): Whether to include quality scores for each cycle
-
-        Returns:
-            a pandas DataFrame with the following columns:
-            if self.positions is not none:
-            xpos, ypos: the positions of the reads
-            if self.sequences is not none:
-            read: the sequences of the reads
-            if self.values is not None:
-            value_cycle??_ch?? for all cycles and channels, containing the values of the reads
-            if qualities is True:
-            quality: the average quality across cycles
-            quality_??: the quality score for each cycle
-            chan?? for all channels, containing the names of the channels in the whole readset
-        """
-        table = {}
-        sequences = (self._sequences is not None) if sequences is None else sequences
-
-        if self.positions is not None:
-            table['xpos'] = self.positions[:,0]
-            table['ypos'] = self.positions[:,1]
-
-        if sequences:
-            table['read'] = self.sequences
-
-        if qualities:
-            qualities = self.qualities
-            table['quality'] = qualities.mean(axis=1)
-            for i in range(self.n_cycles):
-                table['quality_{:02}'.format(i)] = qualities[:,i]
-
-        if self.values is not None:
-            for cycle in range(self.n_cycles):
-                for chan in range(self.n_channels):
-                    table['value_cycle{:02}_ch{:02}'.format(cycle,chan)] = self.values[:,cycle,chan]
-
-        if not np.all(self.channels == Read.DEFAULT_CHANNELS):
-            for i, chan in enumerate(self.channels):
-                table['chan{:02}'.format(i)] = chan
-
-        table.update(self.attrs)
-
-        table = pandas.DataFrame(table)
-        return table
-
-    @staticmethod
-    def from_table(table):
-        """ Constructs a ReadSet from a pandas DataFrame, that was generated from ReadSet.to_table
-        """
-
-        positions, sequences = None, None
-
-        channels = Read.DEFAULT_CHANNELS
-        if 'chan00' in table.columns:
-            channels = []
-            i = 0
-            while 'chan{:02}'.format(i) in table.columns:
-                channels.append(table['chan{:02}'.format(i)].iloc[0])
-                i += 1
-
-        if 'xpos' in table.columns:
-            positions = np.array([table['xpos'].to_numpy(), table['ypos'].to_numpy()]).T
-
-        if 'read' in table.columns:
-            sequences = table['read'].to_numpy()
-
-        values = []
-        i = 0
-        while 'value_cycle{:02}_ch00'.format(i) in table.columns:
-            values.append([table['value_cycle{:02}_ch{:02}'.format(i,j)] for j in range(len(channels))])
-            i += 1
-
-        if len(values) != 0:
-            values = np.array(values).transpose(2,0,1)
-        else:
-            values = None
-
-        attrs = {}
-        for col in table.columns:
-            if (col not in ('xpos', 'ypos', 'read', 'quality')
-                    and not re.match('value_cycle\d\d_ch\d\d$', col)
-                    and not re.match('chan\d\d$', col)
-                    and not re.match('quality_\d+$', col)):
-                attrs[col] = table[col].to_numpy()
-
-        reads = ReadSet(positions=positions, values=values, sequences=sequences, channels=channels, **attrs)
-        return reads
-
-class ReadSetGroups:
-    """ A sequence of ReadSet instances, each with a variable number of reads.
-    Typically used to hold the set of reads in each cell, and is returned by
-    ReadSet.groupby().
-    Can be constructed directly with a sequence of ReadSet instances.
-    """
-    def __init__(self, groups, grouped_by=None):
-        self.max_reads = max(map(len, groups))
-        self.n_groups = len(groups)
-
-        self.groups = groups
-        self.grouped_by = grouped_by
-
-        self.channels = Read.DEFAULT_CHANNELS
-        if len(self.groups) != 0:
-            self.channels = self.groups[0].channels
-
-    def __repr__(self):
-        if len(self) > 8:
-            items = self.groups[:4] + ['\t\t\t...'] + self.groups[-4:]
-        else:
-            items = self.groups
-        return 'ReadSetGroups([{}])'.format(',\n\t'.join(str(group) for group in items))
-
-    def __len__(self):
-        return self.n_groups
-
-    def __getitem__(self, index):
-        return self.groups[index]
-
-    def __iter__(self):
-        return iter(self.groups)
-
-    def combine(self, method=None):
-        return ReadSet([group.combine(method) for group in self.groups])
-        """
-        method = method or {}
-        params = {}
-
-        if self.groups[0].positions is not None:
-            params['positions'] = np.array([group.positions.mean(axis=0) for group in self.groups])
-
-        if self.groups[0].values is not None:
-            params['values'] = np.array([group.values.sum(axis=0) for group in self.groups])
-
-        if self.groups[0]._sequences is not None:
-            seqs = []
-            for group in self.groups:
-                group_seqs, counts = np.unique(group._sequences, return_counts=True)
-                seqs.append(group_seqs[np.argmax(counts)])
-            params['sequences'] = np.array(seqs)
-
-        for name in self.groups[0].attrs.keys():
-            dtype = self.groups[0].attrs[name].dtype
-            default_method = 'mean' if np.issubdtype(dtype, np.floating) else 'mode'
-            cur_method = method.get(name, default_method)
-
-            if callable(cur_method):
-                vals = [cur_method(group.attrs[name]) for group in self.groups]
-            elif cur_method == 'mean':
-                vals = [group.attrs[name].mean(axis=0) for group in self.groups]
-            elif cur_method == 'min':
-                vals = [group.attrs[name].min(axis=0) for group in self.groups]
-            elif cur_method == 'max':
-                vals = [group.attrs[name].max(axis=0) for group in self.groups]
-            elif cur_method == 'sum':
-                vals = [group.attrs[name].sum(axis=0) for group in self.groups]
-            elif cur_method == 'mode':
-                vals = []
-                for group in self.groups:
-                    group_vals, counts = np.unique(group.attrs[name], return_counts=True)
-                    vals.append(group_vals[np.argmax(counts)])
-
-            params[name] = np.array(vals)
-
-        readset = ReadSet(**params)
-        return readset
-        """
-
-    def head(self, max_reads):
-        return ReadSetGroups([readset[:max_reads] for readset in self.groups], grouped_by=self.grouped_by)
-
-    def tail(self, max_reads):
-        return ReadSetGroups([readset[-max_reads:] for readset in self.groups], grouped_by=self.grouped_by)
-
-    def nth(self, index):
-        return ReadSet([readset[index] for readset in self.groups])
-
-    def to_table(self, columns=None, drop_columns=None, **kwargs):
-        """ Creates a table by concatenating the tables of the first, second, third ... read
-        in each set, each with a suffix of _0, _1, _2 respectively.
-        For example, given these groups: [('GTAC', 'GGGG'), ('GTAT',), ('GTGT', 'GGTT', 'TTTT')]
-        The table generated would be:
-        index, num_reads, read_0, read_1, read_2
-        0,     2,         'GTAC', 'GGGG', ''
-        1,     1,         'GTAT', '',     ''
-        2,     3,         'GTGT', 'GGTT', 'TTTT'
-        
-        Args:
-            columns (sequence of str, optional): if specified, only these columns are included
-            drop_columns (sequence of str, optional): if specified, these columns are dropped
-            same as ReadSet.to_table(), arguments are forwarded to each group.
-        Returns:
-            pandas.DataFrame, with columns returned from ReadSet.to_table().
-            There is an additional 'num_reads' column which contains the size of each group
-        """
-        drop_columns = drop_columns or []
-
-        full_table = []
-
-        for group in self.groups:
-            table = group.to_table(**kwargs)
-            if 'chan00' in table.columns:
-                table = table.drop(columns=['chan{:02}'.format(i) for i in range(len(group.channels))])
-            if columns:
-                table = table[columns]
-            if drop_columns:
-                table = table.drop(columns=drop_columns)
-
-            row = [pandas.Series(dict(num_reads=len(table.index)))]
-
-            if self.grouped_by and self.grouped_by in table.columns:
-                row.insert(0, pandas.Series({self.grouped_by: table[self.grouped_by].iloc[0]}))
-                table = table.drop(columns=[self.grouped_by])
-
-            for i in range(len(table.index)):
-                series = table.iloc[i,:]
-                series.index = [col + '_{}'.format(i) for col in series.index]
-                row.append(series)
-
-            full_table.append(pandas.concat(row))
-
-        full_table = pandas.DataFrame(full_table)
-
-        if not np.all(self.channels == Read.DEFAULT_CHANNELS):
-            for i, chan in enumerate(self.channels):
-                full_table['chan{:02}'.format(i)] = chan
-
-        return full_table
-
-    @staticmethod
-    def from_table(table):
-        """ Converts a table generated by ReadSet.to_table
-        """
-
-        channels = None
-        if 'chan00' in table.columns:
-            channels = []
-            i = 0
-            while 'chan{:02}'.format(i) in table.columns:
-                channels.append(table['chan{:02}'.format(i)].iloc[0])
-                i += 1
-
-        max_reads = round(table['num_reads'].max())
-
-        common_cols = [col for col in table.columns if col != 'num_reads' and not re.match('.*_\d+$', col)]
-
-        #num_reads_index = table.columns.get_loc('num_reads')
-        #print (num_reads_index, table.columns[num_reads_index-1])
-        #if num_reads_index >= 1 and not any(table.columns[num_reads_index-1][-len('_{}'.format(i))] == '_{}'.format(i) for i in range(max_reads)):
-            #common_cols.append(table.columns[num_reads_index-1])
-
-        groups = []
-        for i in range(len(table.index)):
-            row = table.iloc[i,:]
-            num_reads = round(row['num_reads'])
-
-            row_table = []
-            for j in range(num_reads):
-                suffix = '_{}'.format(j)
-                cols = [col for col in table.columns if col[-len(suffix):] == suffix]
-                subrow = row[cols]
-                subrow.index = [name[:-len(suffix)] for name in cols]
-                row_table.append(subrow)
-
-            row_table = pandas.DataFrame(row_table)
-
-            if channels is not None:
-                for i in range(len(channels)):
-                    row_table['chan{:02}'.format(i)] = channels[i]
-
-            for col in common_cols:
-                row_table[col] = row[col]
-
-            readset = ReadSet.from_table(row_table)
-            groups.append(readset)
-
-        return ReadSetGroups(groups, grouped_by=None if len(common_cols) == 0 else common_cols[0])
-
-class ReadSetAttrs(dict):
-    def __setitem__(self, name, value):
-        super().__setitem__(name, value)
-        if hasattr(self, 'callback'):
-            self.callback(name, value)
-
-class ReadTable(pandas.DataFrame):
-    @property
-    def _constructor(self):
-        return ReadTable
-
-
-
-
-def read_table(positions=None, values=None, sequences=None, channels=None, **extra_cols):
-    channels = channels or ('G', 'T', 'A', 'C')
-    table = {}
-
-    if positions is not None:
-        table['position','x',''] = positions[:,0]
-        table['position','y',''] = positions[:,1]
-
-    if values is not None:
-        for i in range(values.shape[1]):
-            for j in range(values.shape[2]):
-                table['values',i,channels[j]] = values[:,i,j]
-
-    if sequences is not None:
-        table['read','',''] = sequences
-
-    for name, value in extra_cols.items():
-        table[name,'',''] = value
-
-    return pandas.DataFrame(table)
-
-
-
-
-
 def distance_matrix(
-            reads,
+            table,
             cells=None,
             distance_cutoff=50,
             positional_weight=1.0,
@@ -861,7 +553,7 @@ def distance_matrix(
 
     debug ("Finding neighbors")
     neighbors = sklearn.neighbors.NearestNeighbors(radius=distance_cutoff)
-    neighbors = neighbors.fit(reads.positions)
+    neighbors = neighbors.fit(table.reads.position)
 
     cell_matrix = {}
 
@@ -887,7 +579,7 @@ def distance_matrix(
             cell_dists[section] = 0
 
             for j in indices[i]:
-                x, y = reads.positions[j]
+                x, y = table.reads.position[j]
                 if x >= x1 and x < x2 and y >= y1 and y < y2:
                     dist = cell_dists[int(x-x1),int(y-y1)]
                     cell_matrix.setdefault(j, {})[cell] = dist
@@ -895,14 +587,14 @@ def distance_matrix(
     #fig, axis = plt.subplots()
 
     debug("Calculating dot distances")
-    dists, indices = neighbors.radius_neighbors(reads.positions)
+    dists, indices = neighbors.radius_neighbors(table.reads.position)
 
     #full_matrix = {}
     #ofile.write('i,j,distance\n')
 
-    #for i in progress(range(len(reads.positions))):
-        #for j in range(i+1, len(reads.positions)):
-            #direct_dist = np.linalg.norm(reads.positions[i] - reads.positions[j])
+    #for i in progress(range(len(table.reads.position))):
+        #for j in range(i+1, len(table.reads.position)):
+            #direct_dist = np.linalg.norm(table.reads.position[i] - table.reads.position[j])
             #if direct_dist > distance_cutoff:
                 #continue
     for i, cur_dists, cur_indices in zip(progress(range(len(dists))), dists, indices):
@@ -912,15 +604,18 @@ def distance_matrix(
 
             direct_dist = pos_dist
 
-            read1, read2 = reads[i], reads[j]
+            #begin = time.time()
+            read1, read2 = table.reads[i], table.reads[j]
             seq1, seq2 = read1.sequence_array, read2.sequence_array
+            #end = time.time()
+            #print (end - begin)
 
             #times = []
             #times.append(time.time())
             seq_dist = np.sum(seq1 != seq2)
             #times.append(time.time())
 
-            #value_dist = np.linalg.norm(reads.values[i]) * np.linalg.norm(reads.values[j]) - np.sum(reads.values[i] * reads.values[j])
+            #value_dist = np.linalg.norm(table.reads.values[i]) * np.linalg.norm(table.reads.values[j]) - np.sum(table.reads.values[i] * table.reads.values[j])
             lengths = np.linalg.norm(read1.values, axis=1) * np.linalg.norm(read2.values, axis=1)
             #times.append(time.time())
             prod = np.sum(read1.values * read2.values, axis=1)
@@ -962,12 +657,12 @@ def distance_matrix(
                     if dist < min_cell_dist:
                         min_cell_dist = dist
                         #cell_center = np.argwhere(cells == cell).mean(axis=0)
-                        #axis.plot([reads.positions[i,0], cell_center[0], reads.positions[j,0]], [reads.positions[i,1], cell_center[1], reads.positions[j,1]], color='red')
+                        #axis.plot([table.reads.position[i,0], cell_center[0], table.reads.position[j,0]], [table.reads.position[i,1], cell_center[1], table.reads.position[j,1]], color='red')
                         #debug ('cell closer', cell, dist)
 
             #debug ('cell dist', min_cell_dist)
             dist = min_cell_dist * positional_weight + value_dist * value_weight + seq_dist * sequence_weight
-            #dist = min_cell_dist * positional_weight / distance_cutoff + value_dist * value_weight / reads.n_cycles
+            #dist = min_cell_dist * positional_weight / distance_cutoff + value_dist * value_weight / table.reads.n_cycles
             matrix[i,j] = dist
 
     #fig.savefig('tmp_dists.png')
