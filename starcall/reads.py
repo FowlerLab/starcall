@@ -376,17 +376,17 @@ class ReadsAccessor:
         position, values, sequence = None, None, None
 
         if self.has_position:
-            position = self.position[index,:]
+            position = self.positions[index,:]
 
         if self.has_values:
             values = self.values[index,:]
 
         if self.has_sequence:
-            sequence = self.sequence[index]
+            sequence = self.sequences[index]
 
         attrs = {name: self.table[name].iloc[index] for name in self.attrs}
 
-        read =  Read(position=position, values=values, sequence=sequence, **attrs)
+        read = Read(position=position, values=values, sequence=sequence, **attrs)
         return read
 
         if 'position_x' in self.table.columns:
@@ -411,7 +411,7 @@ class ReadsAccessor:
         return iter(self[i] for i in self.table.index)
 
     @property
-    def position(self):
+    def positions(self):
         if 'position_x' in self.table.columns:
             col1 = self.table.loc[:,'position_x'].to_numpy()
             col2 = self.table.loc[:,'position_y'].to_numpy()
@@ -456,7 +456,7 @@ class ReadsAccessor:
         return None
 
     @property
-    def sequence(self):
+    def sequences(self):
         if 'sequence' in self.table.columns:
             return self.table['sequence'].to_numpy().astype('U')
 
@@ -467,15 +467,15 @@ class ReadsAccessor:
         return sequences
 
     @property
-    def sequence_array(self):
-        sequences = self.sequence
+    def sequences_array(self):
+        sequences = self.sequences
         sequences = np.frombuffer(sequences, 'U1').reshape(len(self.table.index), -1)
         return sequences
 
-    def to_cell_table(self, cell_column='cell', include_attrs=['count']):
+    def to_cell_table(self, cell_column='cell', include_attrs=['count'], cell_index=None):
         include_attrs = [name for name in include_attrs if name in self.table.columns]
 
-        seq_table = {'index': self.table.index, 'sequence': self.sequence, cell_column: self.table[cell_column]}
+        seq_table = {'index': self.table.index, 'sequence': self.sequences, cell_column: self.table[cell_column]}
         for name in include_attrs:
             seq_table[name] = self.table[name]
 
@@ -484,8 +484,14 @@ class ReadsAccessor:
         groups = seq_table.groupby(cell_column)
         max_size = groups.size().max()
 
-        cell_index = pandas.Index(groups.groups.keys())
+        #cell_index = pandas.Index(range(1, max(groups.groups.keys()) + 1))
+        if cell_index is None:
+            cell_index = pandas.Index(groups.groups.keys())
+
+        num_reads = np.zeros(len(cell_index), dtype=int)
+        total_count = np.zeros(len(cell_index), dtype=int)
         tables = []
+
         for i in range(max_size):
             new_table = groups.nth(i)
             new_table = pandas.DataFrame(new_table, index=cell_index)
@@ -493,12 +499,18 @@ class ReadsAccessor:
             if 'count' in include_attrs:
                 new_table['count'] = new_table['count'].fillna(0).astype(int)
 
+            num_reads += new_table['index'] != -1
+            total_count += new_table['count']
+
             renames = {'index': 'index_{}'.format(i), 'sequence': 'read_{}'.format(i)}
             for name in include_attrs:
                 renames[name] = name + '_{}'.format(i)
 
             new_table = new_table.rename(columns=renames)
             tables.append(new_table)
+
+        tables.insert(0, pandas.DataFrame({'num_reads': num_reads}, index=cell_index))
+        tables.append(pandas.DataFrame({'total_count': total_count}, index=cell_index))
 
         return pandas.concat(tables, axis=1)
 
@@ -555,7 +567,7 @@ def distance_matrix(
 
     debug ("Finding neighbors")
     neighbors = sklearn.neighbors.NearestNeighbors(radius=distance_cutoff)
-    neighbors = neighbors.fit(table.reads.position)
+    neighbors = neighbors.fit(table.reads.positions)
 
     cell_matrix = {}
 
@@ -581,7 +593,7 @@ def distance_matrix(
             cell_dists[section] = 0
 
             for j in indices[i]:
-                x, y = table.reads.position[j]
+                x, y = table.reads.positions[j]
                 if x >= x1 and x < x2 and y >= y1 and y < y2:
                     dist = cell_dists[int(x-x1),int(y-y1)]
                     cell_matrix.setdefault(j, {})[cell] = dist
@@ -589,14 +601,14 @@ def distance_matrix(
     #fig, axis = plt.subplots()
 
     debug("Calculating dot distances")
-    dists, indices = neighbors.radius_neighbors(table.reads.position)
+    dists, indices = neighbors.radius_neighbors(table.reads.positions)
 
     #full_matrix = {}
     #ofile.write('i,j,distance\n')
 
-    #for i in progress(range(len(table.reads.position))):
-        #for j in range(i+1, len(table.reads.position)):
-            #direct_dist = np.linalg.norm(table.reads.position[i] - table.reads.position[j])
+    #for i in progress(range(len(table.reads.positions))):
+        #for j in range(i+1, len(table.reads.positions)):
+            #direct_dist = np.linalg.norm(table.reads.positions[i] - table.reads.positions[j])
             #if direct_dist > distance_cutoff:
                 #continue
     for i, cur_dists, cur_indices in zip(progress(range(len(dists))), dists, indices):
@@ -659,7 +671,7 @@ def distance_matrix(
                     if dist < min_cell_dist:
                         min_cell_dist = dist
                         #cell_center = np.argwhere(cells == cell).mean(axis=0)
-                        #axis.plot([table.reads.position[i,0], cell_center[0], table.reads.position[j,0]], [table.reads.position[i,1], cell_center[1], table.reads.position[j,1]], color='red')
+                        #axis.plot([table.reads.positions[i,0], cell_center[0], table.reads.positions[j,0]], [table.reads.positions[i,1], cell_center[1], table.reads.positions[j,1]], color='red')
                         #debug ('cell closer', cell, dist)
 
             #debug ('cell dist', min_cell_dist)
