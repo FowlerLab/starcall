@@ -11,30 +11,30 @@ from . import utils
 from . import dotdetection
 
 def segment_nuclei(dapi, method='stardist', **kwargs):
-	""" Segments nuclei from a single channel, typically stained with DAPI or another nuclear dye
+    """ Segments nuclei from a single channel, typically stained with DAPI or another nuclear dye
 
-	Params:
-		dapi: numpy array of shape (width, height)
-		method: str, default 'stardist'
-			The method of nuclear segmentation that is used. Can be:
-				'otsu_threshold': uses a simple otsu threshold and segments connected regions
-				'stardist': uses stardist to segment nuclei
-		**kwargs: arguments are passed onto the specific method selected
-	
-	Returns: numpy array of shape (width, height), dtype int, where 0 is background and nonzero integers are cell masks
-	"""
+    Params:
+        dapi: numpy array of shape (width, height)
+        method: str, default 'stardist'
+            The method of nuclear segmentation that is used. Can be:
+                'otsu_threshold': uses a simple otsu threshold and segments connected regions
+                'stardist': uses stardist to segment nuclei
+        **kwargs: arguments are passed onto the specific method selected
 
-	if method == 'threshold_otsu':
-		thresh = skimage.filters.threshold_otsu(dapi)
-		mask = dapi > thresh
-		#mask = skimage.morphology.closing(mask, skimage.morphology.disk(2))
-		labels = skimage.measure.label(mask)
-		return labels
-	
-	elif method == 'stardist':
-		return segment_nuclei_stardist(dapi)
-	
-	raise ValueError('Unrecognized method for nuclear segmentation {}'.format(method))
+    Returns: numpy array of shape (width, height), dtype int, where 0 is background and nonzero integers are cell masks
+    """
+
+    if method == 'threshold_otsu':
+        thresh = skimage.filters.threshold_otsu(dapi)
+        mask = dapi > thresh
+        #mask = skimage.morphology.closing(mask, skimage.morphology.disk(2))
+        labels = skimage.measure.label(mask)
+        return labels
+
+    elif method == 'stardist':
+        return segment_nuclei_stardist(dapi)
+
+    raise ValueError('Unrecognized method for nuclear segmentation {}'.format(method))
 
 
 #stardist_model = None
@@ -62,26 +62,26 @@ def estimate_cyto(image):
 
 
 def segment_cells(cyto, dapi, gpu=False, **kwargs):
-	""" Segments cells using a cytoplasm and nuclear channel.
+    """ Segments cells using a cytoplasm and nuclear channel.
 
-	Params:
-		cyto: the cytoplasmic channel, numpy array of shape (width, height)
-		dapi: the nuclear channel, numpy array of shape (width, height)
-		method: str, default 'cellpose'
-			The method to use for cell segmentation. The available methods are:
-				'cellpose': Uses the 'cyto' model of cellpose to segment cells. Expects the parameter 'diameter'
-				'stardist': Uses stardist with only the cyto channel to segment cells
-		**kwargs: arguments are passed to the specified method
-	
-	Returns: numpy int array of shape (width, height), where 0 is background and nonzero integers are cell masks
-	"""
+    Params:
+        cyto: the cytoplasmic channel, numpy array of shape (width, height)
+        dapi: the nuclear channel, numpy array of shape (width, height)
+        method: str, default 'cellpose'
+            The method to use for cell segmentation. The available methods are:
+                'cellpose': Uses the 'cyto' model of cellpose to segment cells. Expects the parameter 'diameter'
+                'stardist': Uses stardist with only the cyto channel to segment cells
+        **kwargs: arguments are passed to the specified method
 
-	if method == 'cellpose':
-		return segment_cyto_cellpose(cyto, dapi, gpu=gpu, **kwargs)
-	elif method == 'stardist':
-		return segment_nuclei_stardist(cyto, **kwargs)
+    Returns: numpy int array of shape (width, height), where 0 is background and nonzero integers are cell masks
+    """
 
-	raise ValueError('Unrecognized segmentation method {}'.format(method))
+    if method == 'cellpose':
+        return segment_cyto_cellpose(cyto, dapi, gpu=gpu, **kwargs)
+    elif method == 'stardist':
+        return segment_nuclei_stardist(cyto, **kwargs)
+
+    raise ValueError('Unrecognized segmentation method {}'.format(method))
 
 
 def segment_cyto_cellpose(cyto, dapi, diameter, gpu=False, 
@@ -113,16 +113,16 @@ def image_log_scale(data, bottom_percentile=10, floor_threshold=50, ignore_zero=
     return scaled - floor
 
 def match_segmentations(cells, nuclei):
-	""" Matches cellular and nuclear segmentation maps
+    """ Matches cellular and nuclear segmentation maps
 
-	The provided cells and nuclei segmentation masks are matched, and any
-	cell or nucleus that does not overlap with a corresponding cell/nucleus
-	is removed. Matching is done by nuclei, as this is typically the more
-	consistent segmentation mask. For each nucleus, all cells that are overlapping
-	are scored by the percent overlap of the nucleus inside the cell, and the highest
-	scoring cell is chosen as the match. Any unmatched cells or nuclei are discarded,
-	and both masks are relabeled to share the same indices between them.
-	"""
+    The provided cells and nuclei segmentation masks are matched, and any
+    cell or nucleus that does not overlap with a corresponding cell/nucleus
+    is removed. Matching is done by nuclei, as this is typically the more
+    consistent segmentation mask. For each nucleus, all cells that are overlapping
+    are scored by the percent overlap of the nucleus inside the cell, and the highest
+    scoring cell is chosen as the match. Any unmatched cells or nuclei are discarded,
+    and both masks are relabeled to share the same indices between them.
+    """
     cell_props = skimage.measure.regionprops(cells)
     nuclei_props = skimage.measure.regionprops(nuclei)
     mapping = {}
