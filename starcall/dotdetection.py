@@ -103,7 +103,8 @@ def dot_filter_new(image, large_sigma=4, copy=True):
     #np.clip(image, 0, None, out=image)
     
     for i in range(image.shape[0]):
-        image[i] -= skimage.filters.gaussian(image[i], large_sigma, channel_axis=0)
+        for j in range(image.shape[1]):
+            image[i,j] -= skimage.filters.gaussian(image[i,j], large_sigma)
         #for j in range(image.shape[1]):
             #image[i,j] = scipy.ndimage.gaussian_laplace(image[i,j], large_sigma)
     #np.clip(image, 0, None, out=image)
@@ -128,7 +129,8 @@ def dot_filter_old(image, large_sigma=4, copy=True):
     np.clip(image, 0, None, out=image)
     
     for i in range(image.shape[0]):
-        image[i] -= skimage.filters.gaussian(image[i], large_sigma, channel_axis=0)
+        for j in range(image.shape[1]):
+            image[i,j] -= skimage.filters.gaussian(image[i,j], large_sigma)
     np.clip(image, 0, None, out=image)
 
     return image.reshape(og_shape)
@@ -172,7 +174,8 @@ def highlight_dots(image, gaussian_blur=None):
 
     if gaussian_blur is not None:
         for i in range(len(image)):
-            image[i] = skimage.filters.gaussian(image[i], sigma=gaussian_blur, channel_axis=0)
+            for j in range(image.shape[1]):
+                image[i,j] = skimage.filters.gaussian(image[i,j], sigma=gaussian_blur)
 
     np.clip(image, 0, None, out=image)
 
