@@ -4,7 +4,6 @@ import skimage.filters
 import skimage.feature
 import skimage.measure
 import matplotlib.pyplot as plt
-import numba
 import tifffile
 
 from . import utils
