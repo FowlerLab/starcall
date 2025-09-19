@@ -1,3 +1,4 @@
+"""
 # STARCall: STitching Alignment and Read Calling for in-situ sequencing experiments
 
 This is the a python package that holds code for the processing of in situ sequencing
@@ -45,3 +46,4 @@ you can do something like:
     table.reads.values /= np.linalg.norm(table.reads.values, axis=2)[:,:,None]
 
 Full reference documentation is available at <https://fowlerlab.github.io/starcall-docs/starcall.html>
+"""

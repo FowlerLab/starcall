@@ -89,6 +89,16 @@ def dot_filter2(image, small_radius=2, large_radius=4, copy=True):
     return image
 
 def dot_filter_new(image, large_sigma=4, copy=True):
+    """ Filter that removes any background in the sequencing images,
+    leaving only the dots from sequencing colonies. Done using a difference
+    of gaussian filter, specified by the parameter large_sigma.
+
+    Args:
+        image (np.ndarray of shape (num_cycles, num_channels, width, height)
+        large_sigma (float): the gaussian sigma that should be subtracted from the sequencing
+            images.
+        copy (bool default True): Whether the input image should be copied or modified in place
+    """
     if copy:
         image = image.copy()
 
@@ -201,10 +211,18 @@ def detect_dots(image,
         image (ndarray of shape (n_cycles, n_channels, width, height)): The input image
         min_sigma, max_sigma, num_sigma (float): Parameters passed to skimage.feature.blob_log
         return_sigmas (bool, default False): Whether to return the sigma values returned from skimage.feature.blob_log
+        channels (tuple of str): The names of the sequencing channels in the image.
+            Defaults to ('G', 'T', 'A', 'C'), but if your sequencing channels are in a different
+            order make sure to specify it here.
         copy (bool default True): Whether the image should be copied or modified in place.
 
     Returns:
         reads (DataFrame): The reads detected in the image, each with a position and read values.
+            The columns in the table are:
+                'position_x', 'position_y': the x and y position of the read colony
+                'values_cycle{cycle}_{chan}': the values from the filtered sequencing images,
+                    for each cycle and channel. The names of the channels are specified
+                    in the parameter 'channels'
         if return_sigmas is specified:
         sigmas (ndarray of shape (n_dots,)): The estimated sigma of all dots detected in the image
     """

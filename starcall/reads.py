@@ -230,6 +230,10 @@ class Read(collections.abc.Mapping):
         return Read(obj)
 
 def make_readset(positions=None, values=None, sequences=None, image=None, channels=None, **kwargs):
+    """ Creates a pandas DataFrame that is compatible with the ReadsAccessor provided
+    by this package.
+
+    """
     tables = []
 
     if positions is not None:
@@ -309,6 +313,29 @@ def join_contiguous_arrays(arrays):
 class ReadsAccessor:
     """ Accessor object to provide attributes and functions for
     dataframes containing in situ sequencing reads
+
+    A dataframe with the columns below can use the accessor:
+        (optional) 'position_x', 'position_y': The pixel location of the sequencing read
+        'values_cycle00_G', 'values_cycle00_T' ... 'values_cycle11_A', 'values_cycle11_C':
+            The sequencing values of the read, from the filtered sequencing images.
+            Values from every cycle and each channel are stored.
+        (optional) 'sequence': The sequences of the read
+
+    The accessor provides custom properties listed below:
+        'positions': a numpy array of shape (num_reads, 2). The positions of the reads,
+        'values': a numpy array of shape (num_reads, num_cycles, num_channels). 
+            The sequencing values for all reads
+        'sequences': a numpy array of strings of shape (num_reads,). If there is a column
+            called 'sequence' in the dataframe this is just the contents of that column.
+            Otherwise, the sequences are generated from the sequencing values, by selecting
+            the maximum channel in each cycle to build up a sequence.
+
+    Changes to positions and values will both propagate back to the underlying dataframe, so
+    you can do something like:
+        table.reads.positions *= 2
+        table.reads.values /= np.linalg.norm(table.reads.values, axis=2)[:,:,None]
+
+    Full reference documentation is available at <https://fowlerlab.github.io/starcall-docs/starcall.html>
     """
     def __init__(self, table):
         self.channels = []
