@@ -61,7 +61,7 @@ def estimate_cyto(image):
     return cyto
 
 
-def segment_cells(cyto, dapi, gpu=False, **kwargs):
+def segment_cells(cyto, dapi, method='cellpose', gpu=False, **kwargs):
     """ Segments cells using a cytoplasm and nuclear channel.
 
     Params:
