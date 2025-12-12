@@ -558,6 +558,11 @@ class ReadsAccessor:
                     aggs['values_cycle{:02}_{}'.format(cycle,chan)] = values
 
         aggs.update(kwargs)
+
+        for name in aggs:
+            if aggs[name] == 'mode':
+                aggs[name] = lambda col: col.mode().max()
+
         aggs = {name: pandas.NamedAgg(column=name, aggfunc=val) for name, val in aggs.items()}
         return aggs
 

@@ -3,4 +3,4 @@ scikit-learn>=1
 numpy>=1
 matplotlib
 tifffile
-pandas==1.5.3
+pandas>=1.4

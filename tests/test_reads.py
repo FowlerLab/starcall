@@ -101,6 +101,21 @@ class TestReads(unittest.TestCase):
         table.reads.values[0,1,2] = 100
         self.assertEqual(table.reads.values[0,1,2], 100)
 
+    def test_consolidation_groupby(self):
+        table = self.readsets[-1]
+        table['cluster'] = self.rng.integers(10, size=len(table.index))
+        table['count'] = np.ones(len(table.index), dtype=int)
+
+        #print (table)
+        #print (table._mgr)
+        combined = table.groupby('cluster')
+        #print (combined.agg({'cell': lambda col: col.mode().max()}))
+        combined = combined.agg(**table.reads.aggfuncs(position='mean', values='sum', count='sum', cell=pandas.Series.mode))
+        print (combined._mgr)
+        #print (combined)
+        combined.reads.normalize()
+        print (combined._mgr)
+
     def test_clustering_line(self):
         poses = np.array([np.arange(20), np.zeros(20, dtype=int)]).T
         values = np.zeros((20, 12, 4))
