@@ -1,5 +1,6 @@
 import unittest
 import starcall.reads
+import pandas
 import numpy as np
 import io
 import math
@@ -58,17 +59,17 @@ class TestReads(unittest.TestCase):
         values = self.rng.random(size=(100, 12, 4))
 
         readset = starcall.reads.make_readset(values=values)
-        self.assertEqual(readset.reads.sequence.shape, (100,))
-        self.assertEqual(str(readset.reads.sequence.dtype)[1:], 'U12')
-        self.assertEqual(readset.reads.sequence_array.shape, (100, 12))
-        self.assertEqual(str(readset.reads.sequence_array.dtype)[1:], 'U1')
+        self.assertEqual(readset.reads.sequences.shape, (100,))
+        self.assertEqual(str(readset.reads.sequences.dtype)[1:], 'U12')
+        self.assertEqual(readset.reads.sequences_array.shape, (100, 12))
+        self.assertEqual(str(readset.reads.sequences_array.dtype)[1:], 'U1')
 
-        #readset.reads.sequence_array = 'G'
-        #self.assertEqual(readset.reads.sequence[51], 'GGGGGGGGGGGG')
-        #readset.reads.sequence_array[:,::2] = 'T'
-        #self.assertEqual(readset.reads.sequence[51], 'TGTGTGTGTGTG')
-        #readset.reads.sequence[51] = 'GTACGTACGTAC'
-        #self.assertEqual(readset.reads.sequence[51], 'GTACGTACGTAC')
+        #readset.reads.sequences_array = 'G'
+        #self.assertEqual(readset.reads.sequences[51], 'GGGGGGGGGGGG')
+        #readset.reads.sequences_array[:,::2] = 'T'
+        #self.assertEqual(readset.reads.sequences[51], 'TGTGTGTGTGTG')
+        #readset.reads.sequences[51] = 'GTACGTACGTAC'
+        #self.assertEqual(readset.reads.sequences[51], 'GTACGTACGTAC')
 
     def test_attrs(self):
         reads = starcall.reads.make_readset(values=self.random_values, count=self.rng.integers(0, 5, size=100), cell=np.arange(100))
@@ -77,6 +78,28 @@ class TestReads(unittest.TestCase):
         self.assertEqual(reads.reads[0]['cell'], 0)
         self.assertEqual(reads.reads[50]['count'], reads['count'][50])
         self.assertEqual(reads.reads[50]['cell'], 50)
+
+    def test_consolidation(self):
+        table = pandas.DataFrame({'position_x': np.arange(10), 'position_y': np.arange(10), 'sequence': ['GTAC'] * 10})
+        self.assertEqual(table.reads.positions.shape, (10, 2))
+        table.reads.positions[0,0] = 100
+        self.assertEqual(table.reads.positions[0,0], 100)
+
+        table = pandas.DataFrame()
+        table['position_x'] = np.arange(10)
+        table['position_y'] = np.arange(10)
+        table['sequence'] = ['GTAC'] * 10
+        self.assertEqual(table.reads.positions.shape, (10, 2))
+        table.reads.positions[0,0] = 100
+        self.assertEqual(table.reads.positions[0,0], 100)
+
+        table = pandas.DataFrame()
+        for cycle in range(12):
+            for chan in 'GTAC':
+                table['values_cycle{:02}_{}'.format(cycle, chan)] = np.arange(10) / 10
+        self.assertEqual(table.reads.values.shape, (10, 12, 4))
+        table.reads.values[0,1,2] = 100
+        self.assertEqual(table.reads.values[0,1,2], 100)
 
     def test_clustering_line(self):
         poses = np.array([np.arange(20), np.zeros(20, dtype=int)]).T
@@ -205,14 +228,14 @@ class TestReads(unittest.TestCase):
         dists = starcall.reads.distance_matrix(reads, value_weight=0, sequence_weight=1, debug=False, progress=False)
 
         #for (i, j), dist in dists.items():
-            #print (reads.reads[i].sequence, reads.reads[j].sequence, dist)
+            #print (reads.reads[i].sequences, reads.reads[j].sequences, dist)
         
         #for threshold in [0.05, 0.1, 0.2, 0.3]:
         for threshold in [1, 2, 3, 4]:
             reads['cluster'] = starcall.reads.cluster_reads(dists, threshold=threshold)
             groups = reads.groupby('cluster')
             for i in range(groups.size().max()):
-                print (' '.join((group.reads.sequence[i] if len(group.index) > i else ' ' * reads.reads.num_cycles) for cluster, group in groups))
+                print (' '.join((group.reads.sequences[i] if len(group.index) > i else ' ' * reads.reads.num_cycles) for cluster, group in groups))
             print()
 
     def test_times(self):
@@ -223,7 +246,7 @@ class TestReads(unittest.TestCase):
         #for i in range(len(table.index)):
         for i in range(5):
             table.reads[i]
-        print (time.time() - begin)
+        #print (time.time() - begin)
 
 
 if __name__ == '__main__':

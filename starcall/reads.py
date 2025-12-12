@@ -437,8 +437,12 @@ class ReadsAccessor:
     def __iter__(self):
         return iter(self[i] for i in self.table.index)
 
+    def _consolidate(self):
+        self.table._mgr._consolidate_inplace()
+
     @property
     def positions(self):
+        self._consolidate()
         if 'position_x' in self.table.columns:
             col1 = self.table.loc[:,'position_x'].to_numpy()
             col2 = self.table.loc[:,'position_y'].to_numpy()
@@ -458,6 +462,7 @@ class ReadsAccessor:
 
     @property
     def values(self):
+        self._consolidate()
         if self.has_values:
             colname1 = 'values_cycle00_{}'.format(self.channels[0])
             colname2 = 'values_cycle00_{}'.format(self.channels[1])
