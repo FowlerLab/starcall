@@ -586,6 +586,22 @@ class ReadsAccessor:
             sorted_values = np.sort(values, axis=2)
             values -= sorted_values[:,:,-2:-1]
 
+    def plot_values(self, path, **kwargs):
+        """ Plots the base values for all reads in this table.
+        Saves an interactive 3d plot with plotly.
+        """
+        from . import visualization
+        visualization.plot_basevalues_plotly(path, self.table, **kwargs)
+
+
+
+
+
+
+
+
+
+
 def distance_matrix(
             table,
             cells=None,

@@ -189,8 +189,9 @@ def highlight_dots(image, gaussian_blur=None):
 
     np.clip(image, 0, None, out=image)
 
-    image = image.std(axis=0)
+    image = image.std(axis=0 if image.shape[0] > 1 else 1)
     image = image.sum(axis=0)
+
     return image
 
 def detect_dots(image,
