@@ -97,7 +97,7 @@ def plot_testset(values, barcodes, path):
 
     fig.savefig(path + '_dot_value_clusters_3d.png')
 
-def plot_basevalues_plotly(path, table, cycle=None):
+def plot_basevalues_plotly(path, table, cycle=None, line_plot=False):
     import plotly.graph_objects as go
     import plotly.express
 
@@ -160,12 +160,20 @@ def plot_basevalues_plotly(path, table, cycle=None):
             #x=x, y=y, z=z, color=length, symbol=barcodes,
             #animation_frame=cycle_indices, animation_group=read_indices,
             #range_x=[-0.7, 0.7], range_y=[-0.5, 0.9], range_z=[-0.5, 0.9])
-    fig = plotly.express.scatter_3d(plot_data,
-            x='x', y='y', z='z', color='length', symbol='symbol',
-            animation_frame='cycle', animation_group='index',
-            hover_data=['index', 'cycle', 'g', 't', 'a', 'c'],
-            range_x=[-0.7, 0.7], range_y=[-0.5, 0.9], range_z=[-0.5, 0.9])
-    fig.update_traces(marker=dict(size=1))
+    if line_plot:
+        fig = plotly.express.line_3d(plot_data,
+                x='x', y='y', z='z', color='index', symbol='cycle', markers=True,
+                #animation_frame='cycle', animation_group='index',
+                hover_data=['index', 'cycle', 'g', 't', 'a', 'c'],
+                range_x=[-0.7, 0.7], range_y=[-0.5, 0.9], range_z=[-0.5, 0.9])
+        #fig.update_traces(marker=dict(size=1))
+    else:
+        fig = plotly.express.scatter_3d(plot_data,
+                x='x', y='y', z='z', color='length', symbol='symbol',
+                animation_frame='cycle', animation_group='index',
+                hover_data=['index', 'cycle', 'g', 't', 'a', 'c'],
+                range_x=[-0.7, 0.7], range_y=[-0.5, 0.9], range_z=[-0.5, 0.9])
+        fig.update_traces(marker=dict(size=1))
 
     #fig.write_html(path + '_dot_value_clusters_3d_cycle{:02}.html'.format(cycle))
     fig.write_html(path, auto_play=False)
