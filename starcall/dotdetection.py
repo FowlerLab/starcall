@@ -185,6 +185,7 @@ def detect_dots(image,
         min_sigma=1,
         max_sigma=2,
         num_sigma=7,
+        offset=0,
         return_sigmas=False,
         channels=None,
         copy=True):
@@ -230,7 +231,36 @@ def detect_dots(image,
             filtered[i,j] = skimage.morphology.dilation(filtered[i,j], footprint)
 
     intposes = poses[:,:2].astype(int)
+    #intposes = np.arange(401714 * 2).reshape(-1, 2) % 8000
     values = image[:,:,intposes[:,0],intposes[:,1]]
+    # REMOVE
+    if offset != 0:
+        #intposes[:,0] += offset
+        #np.clip(intposes[:,0], 0, image.shape[2] - 1, out=intposes[:,0])
+        #np.clip(intposes[:,1], 0, image.shape[3] - 1, out=intposes[:,1])
+        #values = image[:,:,intposes[:,0],intposes[:,1]]
+        #"""
+        intposes[:,0] += offset
+        np.clip(intposes[:,0], 0, image.shape[2] - 1, out=intposes[:,0])
+        np.clip(intposes[:,1], 0, image.shape[3] - 1, out=intposes[:,1])
+        #for i in range(image.shape[0]):
+            #dx, dy = i//2%2 * offset, i%2 * offset
+            #print (dx, dy)
+            #print (intposes)
+            #intposes += [dx, dy]
+            #print ('AFTER', intposes)
+        #intposes[:,0] += offset
+            #if i%2==0: continue
+            #values[i] = image[i,:,intposes[:,0],intposes[:,1]].T
+        rng = np.random.default_rng(12345)
+        cycle = rng.integers(image.shape[0], size=intposes.shape[0])
+        print (values.shape)
+        print (intposes.shape)
+        print (image[cycle,:,intposes[:,0],intposes[:,1]].shape)
+        print (values[cycle,:,np.arange(intposes.shape[0])].shape)
+        values[cycle,:,np.arange(intposes.shape[0])] = image[cycle,:,intposes[:,0],intposes[:,1]]
+        #values[4] = image[4,:,intposes[:,0],intposes[:,1]].T
+        #"""
     values = values.transpose(2,0,1)
 
     #print (values.shape)
