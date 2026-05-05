@@ -111,10 +111,8 @@ class TestReads(unittest.TestCase):
         combined = table.groupby('cluster')
         #print (combined.agg({'cell': lambda col: col.mode().max()}))
         combined = combined.agg(**table.reads.aggfuncs(position='mean', values='sum', count='sum', cell=pandas.Series.mode))
-        print (combined._mgr)
         #print (combined)
         combined.reads.normalize()
-        print (combined._mgr)
 
     def test_clustering_line(self):
         poses = np.array([np.arange(20), np.zeros(20, dtype=int)]).T

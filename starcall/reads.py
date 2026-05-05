@@ -296,7 +296,7 @@ def join_contiguous_arrays(arrays):
     offset = pointers[0] - arrays[0].base.__array_interface__['data'][0]
     assert all(end - begin == stride for begin, end in zip(pointers, pointers[1:]))
 
-    print (offset, stride)
+    #print (offset, stride)
 
     return np.ndarray(
         shape = (len(arrays), arrays[0].shape[0]),
