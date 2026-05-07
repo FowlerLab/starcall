@@ -777,6 +777,7 @@ def cluster_reads(distance_matrix,
             threshold=0.2,
             linkage='mean',
             debug=True,
+            num_reads=None,
             progress=False):
 
     if linkage == 'min':
@@ -784,7 +785,7 @@ def cluster_reads(distance_matrix,
 
     debug, progress = utils.log_env(debug, progress)
     cluster_dists = {}
-    num_reads = 0
+    max_reads = 0
 
     print_matrix = False
 
@@ -793,12 +794,12 @@ def cluster_reads(distance_matrix,
     for (i, j), distance in distance_matrix.items():
         cluster_dists.setdefault(i, {})[j] = distance
         cluster_dists.setdefault(j, {})[i] = distance
-        num_reads = max(num_reads, i, j)
+        max_reads = max(max_reads, i, j)
         heap.push((i,j), distance)
 
     #cluster_dists = distance_matrix.copy()
     #num_reads = max(max(pair) for pair in distance_matrix) + 1
-    num_reads += 1
+    num_reads = num_reads or max_reads + 1
 
     clusters = np.arange(num_reads).reshape(-1,1).tolist()
     #debug (len(clusters))

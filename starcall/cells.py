@@ -509,6 +509,12 @@ class CellsAccessor:
     def centers(self):
         return (self.bboxes[:,2:] + self.bboxes[:,:2]) / 2
 
+    @property
+    def masks(self):
+        if 1 not in self.rescaled_masks:
+            masks = pandas.Series([cell.mask for cell in self], index=self.table.index)
+            self.rescaled_masks[1] = masks
+        return self.rescaled_masks[1]
 
     def decode_masks(self, column, scale):
         masks = [cell.decode_mask(column.iloc[i], scale) for i, cell in enumerate(self)]
