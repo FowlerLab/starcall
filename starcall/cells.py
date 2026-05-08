@@ -175,8 +175,17 @@ class Cell:
         rescaled_masks = None
 
         if mask and self.has_mask and othercell.has_mask:
-            assert self.best_mask_scale == othercell.best_mask_scale
-            scale = self.best_mask_scale
+            scale, scale2 = self.best_mask_scale, othercell.best_mask_scale
+            if scale != scale2:
+                scales = set(self.rescaled_masks) & set(othercell.rescaled_masks)
+                assert len(scales)
+                scale = min(scale)
+                mask1, mask2 = self.rescaled_masks[scale], othercell.rescaled_masks[scale]
+            else:
+                mask1, mask2 = self.best_mask, othercell.best_mask
+
+            #assert self.best_mask_scale == othercell.best_mask_scale
+            #scale = self.best_mask_scale
 
             #offset = np.floor((othercell.bbox[:2] - self.bbox[:2]) / scale).astype(int)
             offset = othercell.bbox[:2] - self.bbox[:2]
@@ -236,7 +245,13 @@ class Cell:
         #newdims = np.round(self.size / scale).astype(int)
         #print ('newdims', self.size, scale, newdims)
         #rescaled = skimage.transform.resize(self.mask, newdims, order=0, preserve_range=True)
-        rescaled = downscale_binary_mask(self.mask, scale)
+        mask, origscale = self.best_mask, self.best_mask_scale
+        if origscale == 1:# or scale // origscale == scale / origscale:
+            #rescaled = downscale_binary_mask(mask, scale // origscale)
+            rescaled = downscale_binary_mask(mask, scale)
+        else:
+            newsize = np.ceil(self.size / scale).astype(int)
+            rescaled = skimage.transform.resize(mask, newsize, order=0, preserve_range=True).astype(bool)
         self.rescaled_masks[scale] = rescaled
         return rescaled
 
@@ -253,11 +268,13 @@ class Cell:
             image = np.zeros((*mask.shape, 4), dtype=np.uint8)
             image[:,:,:3] = [[color]]
             image[:,:,3] = mask * 255
-            axes.imshow(image, extent=(self.bbox[0], self.bbox[2], self.bbox[1], self.bbox[3]), **kwargs)
+            axes.imshow(image, extent=(self.bbox[1], self.bbox[3], self.bbox[0], self.bbox[2]), **kwargs)
+            axes.yaxis.set_inverted(True)
         else:
             xvals = [self.point1[0], self.point1[0], self.point2[0], self.point2[0], self.point1[0]]
             yvals = [self.point1[1], self.point2[1], self.point2[1], self.point1[1], self.point1[1]]
-            axes.plot(xvals, yvals, color='#{:02x}{:02x}{:02x}'.format(*color), **kwargs)
+            axes.plot(yvals, xvals, color='#{:02x}{:02x}{:02x}'.format(*color), **kwargs)
+            axes.yaxis.set_inverted(True)
 
 
 def downscale_binary_mask(mask, scale):
@@ -516,6 +533,23 @@ class CellsAccessor:
             self.rescaled_masks[1] = masks
         return self.rescaled_masks[1]
 
+    @property
+    def best_masks(self):
+        if 1 in self.rescaled_masks: return self.rescaled_masks[1]
+        if self.segmentation is not None:
+            return self.mask
+        if len(self.rescaled_masks) != 0:
+            return self.rescaled_masks[min(self.rescaled_masks)]
+        raise AttributeError('best_mask')
+
+    @property
+    def best_masks_scale(self):
+        if self.segmentation is not None:
+            return 1
+        if len(self.rescaled_masks) != 0:
+            return min(self.rescaled_masks)
+        return None
+
     def decode_masks(self, column, scale):
         masks = [cell.decode_mask(column.iloc[i], scale) for i, cell in enumerate(self)]
         masks = pandas.Series(masks, index=self.table.index)
@@ -541,7 +575,7 @@ class CellsAccessor:
 
     def rescale_masks(self, scale, limit=250):
         cells = list(self)
-        total_size = sum(cell.mask.size for cell in cells)
+        total_size = sum(cell.size.prod() for cell in cells)
         encoded_size = total_size / (scale * scale) * 5 / 32
         if encoded_size / len(cells) > limit:
             return None
@@ -576,6 +610,6 @@ class CellsAccessor:
         for cell in self:
             cell.plot(axes, mask=masks, **kwargs)
 
-        axes.set_xlim(self.bboxes[:,0].min(), self.bboxes[:,2].max())
-        axes.set_ylim(self.bboxes[:,1].min(), self.bboxes[:,3].max())
+        axes.set_xlim(self.bboxes[:,1].min(), self.bboxes[:,3].max())
+        axes.set_ylim(self.bboxes[:,2].max(), self.bboxes[:,0].min())
 

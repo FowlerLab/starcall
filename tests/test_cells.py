@@ -214,6 +214,58 @@ class TestCells(unittest.TestCase):
         #print (matches.cells[1,2].mask)
         #print (matches.cells[1,2].rescaled_masks)
 
+    def test_list_cells(self):
+        segmentation = self.to_segmentation("""
+        001100002200003344
+        001100002200223333
+        111100002222220033
+        111100002200220033
+        001111002222003333
+        001111002255222200
+        001100002222220000
+        001100000000000000
+        """)
+        table = starcall.cells.make_cell_table(segmentation)
+        table.cells.rescale_masks(2)
+
+        fig, axes = plt.subplots()
+        table.cells.plot(axes, masks=True)
+        #fig.savefig('tmp_cells_plot.png')
+
+        file = io.StringIO()
+        table.to_csv(file)
+        file.seek(0)
+        table = pandas.read_csv(file, index_col=0)
+
+        fig, axes = plt.subplots()
+        table.cells.plot(axes, masks=True)
+        #fig.savefig('tmp_cells_plot2.png')
+
+    def test_rescale_from_rescaled(self):
+        segmentation = self.to_segmentation("""
+        001100002200003344
+        001100002200223333
+        111100002222220033
+        111100002200220033
+        001111002222003333
+        001111002255222200
+        001100002222220000
+        001100000000000000
+        """)
+        table = starcall.cells.make_cell_table(segmentation)
+        table.cells.rescale_masks(2)
+
+        file = io.StringIO()
+        table.to_csv(file)
+        file.seek(0)
+        table2 = pandas.read_csv(file, index_col=0)
+
+        table.cells.rescale_masks(4)
+        table2.cells.rescale_masks(4)
+
+        for i in table.index:
+            #print (table.cells.rescaled_masks[4][i], table2.cells.rescaled_masks[4][i])
+            self.assertEqualNumpy(table.cells.rescaled_masks[4][i], table2.cells.rescaled_masks[4][i])
 
 
 
