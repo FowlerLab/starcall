@@ -124,6 +124,11 @@ class Cell:
 
     @property
     def best_mask(self):
+        """ Returns the highest resolution mask of the cell. If the segmentation
+        is available, the full mask will be returned, same as self.mask. If the segmentation
+        is not available but self.rescaled_masks is not empty, the set of masks that are downscaled
+        the least is returned. The scale of the mask returned can be found with self.best_mask_scale
+        """
         if 1 in self.rescaled_masks: return self.rescaled_masks[1]
         if self.global_segmentation is not None:
             return self.mask
@@ -133,6 +138,8 @@ class Cell:
 
     @property
     def best_mask_scale(self):
+        """ The scale of the mask returned by self.best_mask
+        """
         if self.global_segmentation is not None:
             return 1
         if len(self.rescaled_masks) != 0:
@@ -226,7 +233,7 @@ class Cell:
         arr = np.unpackbits(np.frombuffer(data, np.uint8))
         #ratio = len(arr) / self.size.prod()
         ratio = 1 / scale
-        #print (self.bbox)
+        #print (self.bbox, self.size)
         dims = np.ceil(self.size * ratio).astype(int)
         #if dims.prod() > arr.shape[0]:
             #dims = np.round(self.size * ratio).astype(int)
@@ -246,7 +253,7 @@ class Cell:
         #print ('newdims', self.size, scale, newdims)
         #rescaled = skimage.transform.resize(self.mask, newdims, order=0, preserve_range=True)
         mask, origscale = self.best_mask, self.best_mask_scale
-        if origscale == 1:# or scale // origscale == scale / origscale:
+        if origscale == 1 and type(scale) == int:# or scale // origscale == scale / origscale:
             #rescaled = downscale_binary_mask(mask, scale // origscale)
             rescaled = downscale_binary_mask(mask, scale)
         else:
@@ -466,6 +473,12 @@ class CellsAccessor:
                     self.rescaled_masks[1] = self.decode_masks(table[name], scale)
                 if name[4:].isdigit():
                     scale = int(name[4:])
+                    self.rescaled_masks[scale] = self.decode_masks(table[name], scale)
+                try:
+                    scale = float(name[4:])
+                except:
+                    scale = None
+                if scale is not None:
                     self.rescaled_masks[scale] = self.decode_masks(table[name], scale)
 
     def __getitem__(self, index):
