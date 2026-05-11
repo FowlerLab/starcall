@@ -5,6 +5,7 @@ import numpy as np
 import skimage.feature
 import skimage.filters
 import skimage.morphology
+import skimage.segmentation
 import sys
 
 from . import utils
@@ -158,4 +159,40 @@ def match_segmentations(cells, nuclei):
     #np.save('tmp_scores.npy', scores)
 
     return new_cells, new_nuclei
+
+
+
+def filter_segmentation(masks, remove_edges=True, min_area=100, min_bbox=10, relabel=True):
+    """ Filters a segmentation mask based on a set of thresholds typical for
+    cell segmentation. 
+
+    remove_edges: if true masks on the edge of the image are removed
+        with skimage.segmentation.clear_border
+    min_area: removes any cells with an area less than this value
+    min_bbox: removes any cells that have a height or width less than this value
+    relabel: whether to relabel the segmentation mask to be sequential, done
+        with skimage segmentation.relabel_sequential
+    """
+
+    if remove_edges:
+        masks = skimage.segmentation.clear_border(masks)
+
+    if min_area or min_bbox:
+        props = skimage.measure.regionprops(masks)
+        mapping = np.arange(masks.max() + 1, dtype=masks.dtype)
+        remove_masks = False
+
+        for prop in props:
+            if prop.area < min_area or prop.bbox[2] - prop.bbox[0] < min_bbox or prop.bbox[3] - prop.bbox[1] < min_bbox:
+                mapping[prop.label] = 0
+                remove_masks = True
+
+        if remove_masks:
+            masks = mapping[masks]
+
+    if relabel:
+        masks, mapping, rmapping = skimage.segmentation.relabel_sequential(masks)
+
+    return masks
+
 
