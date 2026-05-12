@@ -166,7 +166,63 @@ class Cell:
         if best or method == 'bbox':
             return self.size.prod()
 
+    def union(self, othercell, mask=True):
+        """ Returns a new cell that is the union of the two masks.
+        """
+        bbox = np.array([*np.minimum(self.bbox[:2], othercell.bbox[:2]),
+                *np.maximum(self.bbox[2:], othercell.bbox[2:])])
+        attrs = dict(othercell.attrs.items())
+        attrs.update(dict(self.attrs.items()))
+        newmask = None
+        rescaled_masks = None
+
+        if mask and self.has_mask and othercell.has_mask:
+            scale, scale2 = self.best_mask_scale, othercell.best_mask_scale
+            if scale != scale2:
+                scales = set(self.rescaled_masks) & set(othercell.rescaled_masks)
+                assert len(scales)
+                scale = min(scale)
+                mask1, mask2 = self.rescaled_masks[scale], othercell.rescaled_masks[scale]
+            else:
+                mask1, mask2 = self.best_mask, othercell.best_mask
+
+            offset = othercell.bbox[:2] - self.bbox[:2]
+
+            cur_box = bbox - [*self.bbox[:2], *self.bbox[:2]]
+
+            assert False, "unimplemented"
+            combined_mask = combine_masks_round(self.best_mask, othercell.best_mask, cur_box, offset, scale)
+
+            if scale == 1:
+                newmask = combined_mask
+            else:
+                rescaled_masks = {scale: combined_mask}
+            #if self.global_segmentation is not None and othercell.global_segmentation is not None:
+                #attrs['mask'] = self.mask[bounds] & othercell.mask[otherbounds]
+
+            #for scale in self.rescaled_masks:
+                #if scale in othercell.rescaled_masks:
+                    #attrs.setdefault('rescaled_masks', {})[scale] = self.rescaled_masks[scale][bounds] & othercell.rescaled_masks[scale][otherbounds]
+
+        cell = Cell(
+            index=(self.index, othercell.index),
+            bbox=bbox,
+            global_segmentation=self.global_segmentation,
+            global_image=self.global_image,
+            mask=newmask,
+            rescaled_masks=rescaled_masks,
+            attrs=attrs,
+        )
+
+        return cell
+
     def intersection(self, othercell, mask=True):
+        """ Returns a new cell that is only the overlap of the two cells.
+        The bbox of the new cell is the intersection of the two cells, and if
+        mask=True the mask of the new cell is the intersection of the two
+        masks. Can be combined with area() to calculate the overlapping area
+        of two cells for cell matching or other tasks
+        """
         bbox = np.array([*np.maximum(self.bbox[:2], othercell.bbox[:2]),
                 *np.minimum(self.bbox[2:], othercell.bbox[2:])])
         attrs = dict(othercell.attrs.items())
@@ -262,6 +318,10 @@ class Cell:
         raise AttributeError(name)
 
     def plot(self, axes, mask=False, **kwargs):
+        """ Plots this cell at its global position on the passed in Axes object.
+        If mask=False only the bbox is drawn but if mask=True the mask is
+        drawn instead.
+        """
         color = (12984923847923 * hash(self.index) % 255, 6748392493948 * hash(self.index) % 255, 2398042930222 * hash(self.index) % 255)
         if mask:
             mask = self.best_mask
@@ -361,6 +421,18 @@ def combine_masks_round(mask1, mask2, box, offset, scale, func=np.logical_and):
     return func(mask1[bounds], mask2[otherbounds])
 
 def make_cell_table(segmentation=None, positions=None, sizes=None, image=None, properties=None):
+    """ Create a cell table from a segmentation mask, a list of cells, or individual position and size arrays.
+    Possible methods include:
+        make_cell_table(segmentation, [image, [properties]])
+            Cells are detected in the segmentation with skimage.measure.regionprops. If a phenotype image is provided
+            it is stored on the table as well. properties is a list of strings that specify additional attributes
+            from regionprops to include in the table, such as area, orientation, etc
+        make_cell_table(list_of_cells)
+            All cells are joined together into a table. Extra attributes shared between all cells will be added
+            as columns in the table, as well as masks that are stored on each cell
+        make_cell_table(positions=positions, sizes=sizes)
+            Creates a cell table with no extra data, only the bounding boxes of each cell is included in the table
+    """
     index = None
     cells = None
     rescaled_masks = None
@@ -448,6 +520,24 @@ def make_cell_table(segmentation=None, positions=None, sizes=None, image=None, p
 class CellsAccessor:
     """ Accessor to provide attributes and methods to a table containing cells from
     a segmentation map
+
+    To provide global segmentation masks or phenotype images, directly set the attributes on this accessor:
+        table.cells.segmentation = segmentation
+        table.cells.image = phenotype_image
+
+    The attributes on this accessor include:
+        
+        # position and bbox attributes: (bboxes, positions, and sizes are all modifiable, changes will propagate to the table)
+        bboxes: array of shape (N, 4), the bounding boxes of all cells, ordered (x1, y1, x2, y2)
+        positions: array of shape (N, 2), the centroid position of all cells
+        sizes: array of shape (N, 2), the size of the bounding box of all cells
+        centers: array of shape (N, 2), the centers of the bounding box of all cells
+
+        # mask accessors:
+        masks: pandas.Series() of objects, holding a bool np.array for each cell
+        best_masks: The highest resolution masks for all cells, either self.mask or self.rescaled_masks[min(self.rescaled_masks)]
+        best_masks_scale: The level of downscaling of self.best_masks, 1 if self.best_masks is self.masks
+        rescaled_masks[scale]: pandas.Series() of bool masks for each cell, downscaled by scale
     """
 
     def __init__(self, table):
@@ -574,6 +664,12 @@ class CellsAccessor:
         return column
 
     def rescale_masks(self, scale, limit=250):
+        """ Computes masks for each cell that have been downscaled by scale. These masks
+        are encoded in base85 and stored as a column in the table. This provides a cheap way
+        to store the approximate shape of the cell in a tabular format, allowing for comparisons
+        without having to process the entire cell table. limit sets the limit on the average length
+        of the base85 encoded strings, to make sure the table doesn't become too large.
+        """
         cells = list(self)
         total_size = sum(cell.size.prod() for cell in cells)
         encoded_size = total_size / (scale * scale) * 5 / 32
@@ -587,6 +683,13 @@ class CellsAccessor:
         return masks
 
     def intersecting_cells(self, othertable, method='best'):
+        """ Finds all cell pairs between this table and othertable that have a nonzero overlapping area.
+        Returns a new cell table containing the intersection of each cell pair that is overlapping.
+        The index for the new table is a multiindex with the first level being the index of the cell
+        from this table, and the second level being the index of the cell from othertable.
+
+        method: The method to calculate overlapping area, passed to Cell.area()
+        """
         largest_cell = max(np.linalg.norm(self.sizes, axis=1).max(), np.linalg.norm(othertable.cells.sizes, axis=1).max())
         neighbors = sklearn.neighbors.NearestNeighbors(n_neighbors=5).fit(othertable.cells.centers)
         distances, indices = neighbors.radius_neighbors(self.centers, radius=largest_cell)
@@ -607,6 +710,9 @@ class CellsAccessor:
         return make_cell_table(results)
 
     def plot(self, axes, masks=False, **kwargs):
+        """ Plot all cells in this table, calls Cell.plot for each one.
+        If masks=True the masks for each cell are plotted
+        """
         for cell in self:
             cell.plot(axes, mask=masks, **kwargs)
 
