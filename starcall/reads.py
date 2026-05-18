@@ -13,6 +13,7 @@ import itertools
 import sklearn.neighbors
 import skimage.measure
 import scipy.ndimage
+import scipy.spatial.distance
 import heapq
 import time
 
@@ -598,11 +599,375 @@ class ReadsAccessor:
 
 
 
+def positional_distance_matrix(
+            positions, positions2=None,
+            cells=None,
+            distance_cutoff=50,
+            matrix=None,
+            plot_path=None,
+            debug=True, progress=True):
+    """ Calculates a sparse distance matrix 
+    """
+
+    if positions2 is None:
+        positions2 = positions
+
+    debug, progress = utils.log_env(debug, progress)
+
+    if matrix is None:
+        matrix = {}
+
+    """
+    if cells is not None:
+        # adding all reads in same cell as zero distance
+        cell_groups = {}
+
+        for i, (x,y) in enumerate(positions):
+            cell_groups.setdefault(cells[x,y], ([], []))[0].append(i)
+        for i, (x,y) in enumerate(positions2):
+            cell_groups2.setdefault(cells[x,y], ([], []))[1].append(i)
+
+        for cellid, (group1, group2) in cell_groups.items():
+            for i in group1:
+                for j in group2:
+                    matrix[i,j] = 0
+    """
+
+    radius = distance_cutoff
+    if cells is not None:
+        props = skimage.measure.regionprops(cells)
+        max_size = max((np.linalg.norm([prop.bbox[2] - prop.bbox[0], prop.bbox[1] - prop.bbox[3]]) for prop in props), default=0)
+        radius += max_size
+
+    cells_dists = set()
+    if cells is not None:
+        debug ("Calculating cell distances")
+
+        neighbors = sklearn.neighbors.NearestNeighbors(radius=radius).fit(positions)
+        neighbors2 = sklearn.neighbors.NearestNeighbors(radius=radius).fit(positions2)
+
+        cell_poses = np.array([prop.centroid for prop in props])
+        bboxes = np.array([prop.bbox for prop in props])
+        dists, indices = neighbors.radius_neighbors(cell_poses, radius=radius)
+        dists2, indices2 = neighbors2.radius_neighbors(cell_poses, radius=radius)
+
+        for i, bbox in enumerate(progress(bboxes)):
+            cell = props[i].label
+            x1 = max(0, int(bbox[0]) - distance_cutoff)
+            y1 = max(0, int(bbox[1]) - distance_cutoff)
+            x2 = int(bbox[2]) + distance_cutoff
+            y2 = int(bbox[3]) + distance_cutoff
+            section = cells[x1:x2,y1:y2] == cell
+
+            if distance_cutoff <= 1:
+                # avoid edt calculation if we only are looking at reads inside cell
+                cell_dists = ~section
+            else:
+                cell_dists = scipy.ndimage.distance_transform_edt(~section)
+                cell_dists[section] = 0
+
+            #print (indices[i])
+            #print (indices2[i])
+
+            cur_poses = positions[indices[i]] - [[x1, y1]]
+            cur_poses = np.round(cur_poses).astype(int)
+            cur_poses2 = positions2[indices2[i]] - [[x1, y1]]
+            cur_poses2 = np.round(cur_poses2).astype(int)
+            #print (cur_poses)
+            #print (cell_dists.astype(int))
+
+            for j in indices[i]:
+                x,y = positions[j] - [x1, y1]
+                if not (0 <= x < section.shape[0]) or not (0 <= y < section.shape[1]):
+                    continue
+                for k in indices2[i]:
+                    #if k < j: continue
+
+                    z,w = positions2[k] - [x1, y1]
+                    if 0 <= z < section.shape[0] and 0 <= w < section.shape[1]:
+                        #print (x, y, z, w)
+                        dist = cell_dists[x,y] + cell_dists[z,w]
+                        if dist <= distance_cutoff:
+                            matrix[j,k] = dist
+                            cells_dists.add((j,k))
+
+            """
+            read_cell_dists = (cell_dists[cur_poses[:,0],cur_poses[:,1]].reshape(-1,1)
+                             + cell_dists[cur_poses2[:,0],cur_poses2[:,1]].reshape(1,-1))
+            for pair in np.argwhere(read_cell_dists > distance_cutoff):
+                pair = tuple(pair) if pair[0] < pair[1] else (pair[1], pair[0])
+                matrix[pair] = read_cell_dists[pair]
+                cells_dists.add(pair)
+            """
+        debug ("  done")
+
+    debug ("Calculating positional distances")
+    if cells is None:
+        neighbors = sklearn.neighbors.NearestNeighbors(radius=distance_cutoff).fit(positions)
+    dists, indices = neighbors.radius_neighbors(positions2, radius=distance_cutoff)
+    debug ("  done")
+
+    for i in range(len(dists)):
+        for j, dist in zip(indices[i], dists[i]):
+            #pair = (i,j) if i < j else (j,i)
+            pair = j,i
+            if pair in cells_dists:
+                matrix[pair] = min(matrix[pair], dist)
+            else:
+                matrix[pair] = dist
+
+    if plot_path is not None:
+        plot_positional_dist_matrix(plot_path, matrix, positions, positions2, cells)
+
+    return matrix
 
 
+def plot_positional_dist_matrix(path, matrix, positions, positions2, cells=None):
+    import matplotlib.pyplot as plt
+    import matplotlib.collections
+
+    fig, axes = plt.subplots()
+
+    if cells is not None:
+        axes.imshow(cells, cmap='Greys')
+
+    lines = []
+    colors = []
+    for (i,j), dist in matrix.items():
+        lines.append([(positions[i][1], positions[i][0]), (positions2[j][1], positions2[j][0])])
+        colors.append(dist)
+
+    lines, colors = np.array(lines), np.array(colors)
+    lines = lines[np.argsort(-colors)]
+    colors = colors[np.argsort(-colors)]
+
+    lines = matplotlib.collections.LineCollection(lines, linewidths=colors * 3 + 1, zorder=0)
+    lines.set_array(colors)
+    axes.add_collection(lines)
+
+    axes.scatter(positions[:,1], positions[:,0], s=50)
+    axes.scatter(positions2[:,1], positions2[:,0], s=50)
+
+    fig.colorbar(lines)
+    fig.savefig(path)
+
+
+class LazyDistanceMatrix:
+    def __init__(self, reads, reads2, distance_cutoff, distance_func, full_matrix_func, **args):
+        self.reads, self.reads2 = reads, reads2
+        self.distance_cutoff = distance_cutoff
+        self.distance_func = distance_func
+        self.full_matrix_func = full_matrix_func
+        self.args = args
+
+    def __contains__(self, pair):
+        return self.distance_func(self.reads[pair[0]], self.reads2[pair[1]], **self.args) <= self.distance_func
+
+    def __getitem__(self, pair):
+        return self.distance_func(self.reads[pair[0]], self.reads2[pair[1]], **self.args)
+
+    def todict(self):
+        return self.full_matrix_func(self.reads, self.reads2, distance_cutoff=self.distance_cutoff, lazy=False, **self.args)
+
+    def items(self):
+        return self.todict().items()
+
+
+def values_distance(vals1, vals2, metric='euclidean'):
+    return getattr(scipy.spatial.distance, metric)(vals1, vals2)
+
+def value_distance_matrix(
+            values, values2=None,
+            distance_cutoff=50,
+            metric='euclidean',
+            matrix=None,
+            debug=True, progress=True):
+
+    if values2 is None:
+        values2 = values
+
+    debug, progress = utils.log_env(debug, progress)
+
+    if lazy and matrix is None:
+        return LazyDistanceMatrix(values, values2, distance_cutoff, values_distance, value_distance_matrix, metric=metric)
+
+    if matrix is None:
+        matrix = {}
+
+    neighbors = sklearn.neighbors.NearestNeighbors(radius=distance_cutoff, metric=metric).fit(values.reshape(values.shape[0], -1))
+    dists, indices = neighbors.radius_neighbors(values2.reshape(values.shape[0], -1), radius=distance_cutoff)
+
+    for i in range(len(dists)):
+        for j, dist in zip(indices[i], dists[i]):
+            #pair = (i,j) if i < j else (j,i)
+            matrix[i,j] = dist
+
+    return matrix
+
+
+def sequences_to_array(barcodes):
+    """ Helper function to turn an array of strings into
+    a array of uint8 with an extra dimension of the characters
+    of the string
+    """
+    barcodes = np.asarray(barcodes)
+
+    orig_shape = barcodes.shape
+    #barcodes = barcodes.reshape(-1).astype(bytes, copy=True)
+    #barcodes = barcodes.reshape(-1).astype(bytes, copy=True)
+    max_len = max(map(len, barcodes.flat))
+
+    #values = np.frombuffer(barcodes, dtype=np.uint8).reshape(barcodes.shape[0], barcodes.dtype.itemsize)
+    values = np.frombuffer(barcodes, dtype=np.uint8).reshape(barcodes.shape[0], barcodes.dtype.itemsize)
+    return values.reshape(orig_shape + (-1,))
+
+def sequences_to_vector(sequences, channels=('G', 'T', 'A', 'C')):
+    arr = np.frombuffer(sequences, 'U1').reshape(len(sequences), -1)
+    vec = np.stack([(arr == let) / 2 for let in channels], axis=-1)
+    return vec
+
+def sequence_distance(seq1, seq2):
+    return sum(let1 != let2 for let1, let2 in zip(seq1, seq2)) + abs(len(seq1) - len(seq2))
+
+
+def sequence_distance_matrix(
+            sequences, sequences2=None,
+            distance_cutoff=50,
+            matrix=None, lazy=False,
+            debug=True, progress=True):
+
+    if sequences2 is None:
+        sequences2 = sequences
+
+    debug, progress = utils.log_env(debug, progress)
+
+    if lazy and matrix is None:
+        return LazyDistanceMatrix(sequences, sequences, distance_cutoff, sequence_distance, sequence_distance_matrix)
+
+    if matrix is None:
+        matrix = {}
+
+    if distance_cutoff < 1 and False:
+        # only looking for exact matches, can be much more efficient
+        indices = np.argsort(sequences)
+        indices2 = np.argsort(sequences2)
+
+        index, base_index2, index2 = 0, 0, 0
+        while index < len(indices):
+            seq1, seq2 = sequences[indices[index]], 
+            #if sequences[indices[index]]
+
+    vecs = sequences_to_vector(sequences).reshape(len(sequences), -1)
+    vecs2 = sequences_to_vector(sequences2).reshape(len(sequences), -1)
+    neighbors = sklearn.neighbors.NearestNeighbors(radius=distance_cutoff, metric='cityblock').fit(vecs)
+    dists, indices = neighbors.radius_neighbors(vecs2, radius=distance_cutoff)
+
+    for i in range(len(dists)):
+        for j, dist in zip(indices[i], dists[i]):
+            #pair = (i,j) if i < j else (j,i)
+            matrix[i,j] = dist
+
+    return matrix
 
 
 def distance_matrix(
+            table, table2=None,
+            cells=None,
+            distance_cutoff=50,
+            positional_weight=1.0,
+            value_weight=1.0,
+            sequence_weight=1.0,
+            value_distance_metric='euclidean',
+            matrix=None,
+            debug=True, progress=True):
+    """ Calculates a sparse distance matrix between two sets of reads.
+    Can be used for multiple applications, such as clustering reads found in
+    cells, matching reads to a barcode library, or clustering reads outside
+    of cell boundaries.
+
+    The distance between two reads has three components, calculated from the tree components of a read.
+    Each is weighted using the parameters passed in:
+        positional_weight: the euclidean distance between the two reads
+        value_weight: the euclidean distance between the vector of raw read values for the two reads
+        sequence_weight: the edit distance between the two read sequences
+
+    These components are combined with their respective weights to calculate a final distance.
+    If this distance is less than or equal to distance_cutoff, it is added to the matrix.
+    """
+
+    if table2 is None:
+        table2 = table
+
+    debug, progress = utils.log_env(debug, progress)
+
+    cur_matrix = None
+
+    if table.reads.has_position and table2.reads.has_position and positional_weight > 0:
+        pos_dists = positional_distance_matrix(
+                        table.reads.positions, table2.reads.positions,
+                        distance_cutoff=distance_cutoff / positional_weight,
+                        cells=cells,
+                        debug=debug, progress=progress)
+
+        cur_matrix = {}
+        for pair, dist in pos_dists.items():
+            cur_matrix[pair] = dist * positional_weight
+
+    if table.reads.has_values and table2.reads.has_values and value_weight > 0:
+        value_dists = value_distance_matrix(
+                        table.reads.values, table2.reads.values,
+                        distance_cutoff=distance_cutoff / value_weight,
+                        metric=value_distance_metric,
+                        lazy=cur_matrix is not None,
+                        debug=debug, progress=progress)
+
+        if cur_matrix is None:
+            cur_matrix = {}
+            for pair, dist in value_dists.items():
+                cur_matrix[pair] = dist * value_weight
+
+        else:
+            new_matrix = {}
+            for pair, curdist in cur_matrix.items():
+                if pair not in value_dists:
+                    continue
+                newdist = curdist + value_dists[pair] * value_weight
+                if newdist > distance_cutoff:
+                    continue
+                new_matrix[pair] = newdist
+            cur_matrix = new_matrix
+
+    if sequence_weight > 0:
+        sequence_dists = value_distance_matrix(
+                        table.reads.values, table2.reads.values,
+                        distance_cutoff=distance_cutoff / sequence_weight,
+                        lazy=cur_matrix is not None,
+                        debug=debug, progress=progress)
+
+        if cur_matrix is None:
+            cur_matrix = {}
+            for pair, dist in sequence_dists.items():
+                cur_matrix[pair] = dist * sequence_weight
+
+        else:
+            new_matrix = {}
+            for pair, curdist in cur_matrix.items():
+                if pair not in sequence_dists:
+                    continue
+                newdist = curdist + sequence_dists[pair] * sequence_weight
+                if newdist > distance_cutoff:
+                    continue
+                new_matrix[pair] = newdist
+            cur_matrix = new_matrix
+
+    if matrix is None:
+        return cur_matrix
+
+    for pair, dist in cur_matrix:
+        matrix[pair] = dist
+
+
+def distance_matrix_old(
             table,
             cells=None,
             distance_cutoff=50,
@@ -790,12 +1155,20 @@ def cluster_reads(distance_matrix,
     print_matrix = False
 
     heap = Heap()
+    clusters_added = set()
 
     for (i, j), distance in distance_matrix.items():
+        if j < i: i, j = j, i
+        if i == j or (i,j) in clusters_added:
+            # remove duplicate edges in distance matrix
+            continue
         cluster_dists.setdefault(i, {})[j] = distance
         cluster_dists.setdefault(j, {})[i] = distance
         max_reads = max(max_reads, i, j)
         heap.push((i,j), distance)
+        clusters_added.add((i,j))
+
+    del clusters_added
 
     #cluster_dists = distance_matrix.copy()
     #num_reads = max(max(pair) for pair in distance_matrix) + 1
