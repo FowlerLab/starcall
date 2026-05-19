@@ -4,6 +4,7 @@ short reads that are generated from in situ sequencing.
 Reads are stored as the Read dataclass and in pandas dataframes.
 """
 
+import math
 import pandas
 import dataclasses
 from typing import Optional
@@ -653,10 +654,10 @@ def positional_distance_matrix(
 
         for i, bbox in enumerate(progress(bboxes)):
             cell = props[i].label
-            x1 = max(0, int(bbox[0]) - distance_cutoff)
-            y1 = max(0, int(bbox[1]) - distance_cutoff)
-            x2 = int(bbox[2]) + distance_cutoff
-            y2 = int(bbox[3]) + distance_cutoff
+            x1 = max(0, math.floor(bbox[0] - distance_cutoff))
+            y1 = max(0, math.floor(bbox[1] - distance_cutoff))
+            x2 = math.ceil(bbox[2] + distance_cutoff)
+            y2 = math.ceil(bbox[3] + distance_cutoff)
             section = cells[x1:x2,y1:y2] == cell
 
             if distance_cutoff <= 1:
@@ -677,15 +678,16 @@ def positional_distance_matrix(
             #print (cell_dists.astype(int))
 
             for j in indices[i]:
-                x,y = positions[j] - [x1, y1]
+                x,y = np.round(positions[j]).astype(int) - [x1, y1]
                 if not (0 <= x < section.shape[0]) or not (0 <= y < section.shape[1]):
                     continue
                 for k in indices2[i]:
                     #if k < j: continue
 
-                    z,w = positions2[k] - [x1, y1]
+                    z,w = np.round(positions2[k]).astype(int) - [x1, y1]
                     if 0 <= z < section.shape[0] and 0 <= w < section.shape[1]:
-                        #print (x, y, z, w)
+                        #debug (positions[j])
+                        #debug (x, y, z, w)
                         dist = cell_dists[x,y] + cell_dists[z,w]
                         if dist <= distance_cutoff:
                             matrix[j,k] = dist
@@ -761,7 +763,7 @@ class LazyDistanceMatrix:
         self.args = args
 
     def __contains__(self, pair):
-        return self.distance_func(self.reads[pair[0]], self.reads2[pair[1]], **self.args) <= self.distance_func
+        return self.distance_func(self.reads[pair[0]], self.reads2[pair[1]], **self.args) <= self.distance_cutoff
 
     def __getitem__(self, pair):
         return self.distance_func(self.reads[pair[0]], self.reads2[pair[1]], **self.args)
@@ -781,6 +783,7 @@ def value_distance_matrix(
             distance_cutoff=50,
             metric='euclidean',
             matrix=None,
+            lazy=True,
             debug=True, progress=True):
 
     if values2 is None:
@@ -789,7 +792,7 @@ def value_distance_matrix(
     debug, progress = utils.log_env(debug, progress)
 
     if lazy and matrix is None:
-        return LazyDistanceMatrix(values, values2, distance_cutoff, values_distance, value_distance_matrix, metric=metric)
+        return LazyDistanceMatrix(values.reshape(values.shape[0], -1), values2.reshape(values2.shape[0], -1), distance_cutoff, values_distance, value_distance_matrix, metric=metric)
 
     if matrix is None:
         matrix = {}
@@ -874,9 +877,9 @@ def distance_matrix(
             table, table2=None,
             cells=None,
             distance_cutoff=50,
-            positional_weight=1.0,
-            value_weight=1.0,
-            sequence_weight=1.0,
+            positional_weight=0.0,
+            value_weight=0.0,
+            sequence_weight=0.0,
             value_distance_metric='euclidean',
             matrix=None,
             debug=True, progress=True):
@@ -894,6 +897,9 @@ def distance_matrix(
     These components are combined with their respective weights to calculate a final distance.
     If this distance is less than or equal to distance_cutoff, it is added to the matrix.
     """
+
+    if positional_weight <= 0 and value_weight <= 0 and sequence_weight <= 0:
+        raise ValueError('One of positional_weight, value_weight, sequence_weight must be nozero to calculate distances')
 
     if table2 is None:
         table2 = table
@@ -938,8 +944,8 @@ def distance_matrix(
             cur_matrix = new_matrix
 
     if sequence_weight > 0:
-        sequence_dists = value_distance_matrix(
-                        table.reads.values, table2.reads.values,
+        sequence_dists = sequence_distance_matrix(
+                        table.reads.sequences, table2.reads.sequences,
                         distance_cutoff=distance_cutoff / sequence_weight,
                         lazy=cur_matrix is not None,
                         debug=debug, progress=progress)
