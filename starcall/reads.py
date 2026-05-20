@@ -598,12 +598,17 @@ class ReadsAccessor:
 
 
 
+def default_dist_matrix():
+    return pandas.Series(name='distance', dtype=float,
+            index=pandas.MultiIndex(levels=[[], []], codes=[[], []], names=['i', 'j']))
+    #return {}
 
 
 def positional_distance_matrix(
             positions, positions2=None,
             cells=None,
             distance_cutoff=50,
+            max_entries=None,
             matrix=None,
             plot_path=None,
             debug=True, progress=True):
@@ -616,7 +621,7 @@ def positional_distance_matrix(
     debug, progress = utils.log_env(debug, progress)
 
     if matrix is None:
-        matrix = {}
+        matrix = default_dist_matrix()
 
     """
     if cells is not None:
@@ -662,7 +667,7 @@ def positional_distance_matrix(
 
             if distance_cutoff <= 1:
                 # avoid edt calculation if we only are looking at reads inside cell
-                cell_dists = ~section
+                cell_dists = (~section).astype(float)
             else:
                 cell_dists = scipy.ndimage.distance_transform_edt(~section)
                 cell_dists[section] = 0
@@ -705,18 +710,22 @@ def positional_distance_matrix(
 
     debug ("Calculating positional distances")
     if cells is None:
-        neighbors = sklearn.neighbors.NearestNeighbors(radius=distance_cutoff).fit(positions)
-    dists, indices = neighbors.radius_neighbors(positions2, radius=distance_cutoff)
+        neighbors = sklearn.neighbors.NearestNeighbors(radius=distance_cutoff).fit(positions2)
+    else:
+        neighbors = neighbors2
+
+    if max_entries is not None:
+        dists, indices = neighbors.kneighbors(positions, n_neighbors=max_entries)
+    else:
+        dists, indices = neighbors.radius_neighbors(positions, radius=distance_cutoff)
     debug ("  done")
 
     for i in range(len(dists)):
         for j, dist in zip(indices[i], dists[i]):
-            #pair = (i,j) if i < j else (j,i)
-            pair = j,i
-            if pair in cells_dists:
-                matrix[pair] = min(matrix[pair], dist)
+            if (i,j) in cells_dists:
+                matrix[i,j] = min(matrix[i,j], dist)
             else:
-                matrix[pair] = dist
+                matrix[i,j] = dist
 
     if plot_path is not None:
         plot_positional_dist_matrix(plot_path, matrix, positions, positions2, cells)
@@ -781,6 +790,7 @@ def values_distance(vals1, vals2, metric='euclidean'):
 def value_distance_matrix(
             values, values2=None,
             distance_cutoff=50,
+            max_entries=None,
             metric='euclidean',
             matrix=None,
             lazy=True,
@@ -795,10 +805,13 @@ def value_distance_matrix(
         return LazyDistanceMatrix(values.reshape(values.shape[0], -1), values2.reshape(values2.shape[0], -1), distance_cutoff, values_distance, value_distance_matrix, metric=metric)
 
     if matrix is None:
-        matrix = {}
+        matrix = default_dist_matrix()
 
-    neighbors = sklearn.neighbors.NearestNeighbors(radius=distance_cutoff, metric=metric).fit(values.reshape(values.shape[0], -1))
-    dists, indices = neighbors.radius_neighbors(values2.reshape(values.shape[0], -1), radius=distance_cutoff)
+    neighbors = sklearn.neighbors.NearestNeighbors(radius=distance_cutoff, metric=metric).fit(values2.reshape(values.shape[0], -1))
+    if max_entries is not None:
+        dists, indices = neighbors.kneighbors(values.reshape(values.shape[0], -1), n_neighbors=max_entries)
+    else:
+        dists, indices = neighbors.radius_neighbors(values.reshape(values.shape[0], -1), radius=distance_cutoff)
 
     for i in range(len(dists)):
         for j, dist in zip(indices[i], dists[i]):
@@ -836,6 +849,7 @@ def sequence_distance(seq1, seq2):
 def sequence_distance_matrix(
             sequences, sequences2=None,
             distance_cutoff=50,
+            max_entries=None,
             matrix=None, lazy=False,
             debug=True, progress=True):
 
@@ -848,7 +862,7 @@ def sequence_distance_matrix(
         return LazyDistanceMatrix(sequences, sequences, distance_cutoff, sequence_distance, sequence_distance_matrix)
 
     if matrix is None:
-        matrix = {}
+        matrix = default_dist_matrix()
 
     if distance_cutoff < 1 and False:
         # only looking for exact matches, can be much more efficient
@@ -861,9 +875,12 @@ def sequence_distance_matrix(
             #if sequences[indices[index]]
 
     vecs = sequences_to_vector(sequences).reshape(len(sequences), -1)
-    vecs2 = sequences_to_vector(sequences2).reshape(len(sequences), -1)
-    neighbors = sklearn.neighbors.NearestNeighbors(radius=distance_cutoff, metric='cityblock').fit(vecs)
-    dists, indices = neighbors.radius_neighbors(vecs2, radius=distance_cutoff)
+    vecs2 = sequences_to_vector(sequences2).reshape(len(sequences2), -1)
+    neighbors = sklearn.neighbors.NearestNeighbors(radius=distance_cutoff, metric='cityblock').fit(vecs2)
+    if max_entries is not None:
+        dists, indices = neighbors.kneighbors(vecs, n_neighbors=max_entries)
+    else:
+        dists, indices = neighbors.radius_neighbors(vecs, radius=distance_cutoff)
 
     for i in range(len(dists)):
         for j, dist in zip(indices[i], dists[i]):
@@ -877,6 +894,7 @@ def distance_matrix(
             table, table2=None,
             cells=None,
             distance_cutoff=50,
+            max_entries=None,
             positional_weight=0.0,
             value_weight=0.0,
             sequence_weight=0.0,
@@ -912,10 +930,11 @@ def distance_matrix(
         pos_dists = positional_distance_matrix(
                         table.reads.positions, table2.reads.positions,
                         distance_cutoff=distance_cutoff / positional_weight,
+                        max_entries=max_entries,
                         cells=cells,
                         debug=debug, progress=progress)
 
-        cur_matrix = {}
+        cur_matrix = default_dist_matrix()
         for pair, dist in pos_dists.items():
             cur_matrix[pair] = dist * positional_weight
 
@@ -923,17 +942,18 @@ def distance_matrix(
         value_dists = value_distance_matrix(
                         table.reads.values, table2.reads.values,
                         distance_cutoff=distance_cutoff / value_weight,
+                        max_entries=max_entries,
                         metric=value_distance_metric,
                         lazy=cur_matrix is not None,
                         debug=debug, progress=progress)
 
         if cur_matrix is None:
-            cur_matrix = {}
+            cur_matrix = default_dist_matrix()
             for pair, dist in value_dists.items():
                 cur_matrix[pair] = dist * value_weight
 
         else:
-            new_matrix = {}
+            new_matrix = default_dist_matrix()
             for pair, curdist in cur_matrix.items():
                 if pair not in value_dists:
                     continue
@@ -947,16 +967,17 @@ def distance_matrix(
         sequence_dists = sequence_distance_matrix(
                         table.reads.sequences, table2.reads.sequences,
                         distance_cutoff=distance_cutoff / sequence_weight,
+                        max_entries=max_entries,
                         lazy=cur_matrix is not None,
                         debug=debug, progress=progress)
 
         if cur_matrix is None:
-            cur_matrix = {}
+            cur_matrix = default_dist_matrix()
             for pair, dist in sequence_dists.items():
                 cur_matrix[pair] = dist * sequence_weight
 
         else:
-            new_matrix = {}
+            new_matrix = default_dist_matrix()
             for pair, curdist in cur_matrix.items():
                 if pair not in sequence_dists:
                     continue
