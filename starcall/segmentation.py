@@ -85,20 +85,25 @@ def segment_cells(cyto, dapi, method='cellpose', gpu=False, **kwargs):
     raise ValueError('Unrecognized segmentation method {}'.format(method))
 
 
-def segment_cyto_cellpose(cyto, dapi, diameter, gpu=False, 
+def segment_cyto_cellpose(cyto, dapi, diameter, use_nuclei_channel, gpu=False, 
                      cyto_model='cyto', logscale=True):
     from cellpose.models import Cellpose
 
+    model_cyto = Cellpose(model_type=cyto_model, gpu=gpu)
+    print ('diameter used: ', diameter)
+
     if logscale:
         cyto = image_log_scale(cyto)
-    img = np.array([dapi, cyto])
-
-    model_cyto = Cellpose(model_type=cyto_model, gpu=gpu)
-    
-    cells, _, _, _  = model_cyto.eval(img, channels=[2, 1], diameter=diameter)
+    #allow the model to use just the cytoplasm info vs cytoplasm and nuclei
+    if use_nuclei_channel:
+        img = np.array([dapi, cyto])
+        cells, _, _, _  = model_cyto.eval(img, channels = [2,1], diameter=diameter)
+    else:
+        img = np.array([cyto, dapi])
+        cells, _, _, _  = model_cyto.eval(img, diameter=diameter)
 
     return cells
-
+ 
 def image_log_scale(data, bottom_percentile=10, floor_threshold=50, ignore_zero=True):
     data = data.astype(float)
     if ignore_zero:

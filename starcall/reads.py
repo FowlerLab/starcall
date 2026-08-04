@@ -516,7 +516,7 @@ class ReadsAccessor:
         seq_table = pandas.DataFrame(seq_table)
 
         groups = seq_table.groupby(cell_column)
-        max_size = groups.size().max()
+        max_size = groups.size().max() if len(seq_table.index) else 0
 
         #cell_index = pandas.Index(range(1, max(groups.groups.keys()) + 1))
         if cell_index is None:
@@ -1020,28 +1020,28 @@ def distance_matrix_old(
 
     if cells is not None:
         props = skimage.measure.regionprops(cells)
+        if len(props) > 0: #non empty masks in cells
+            cell_poses = np.array([prop.centroid for prop in props])
+            bboxes = np.array([prop.bbox for prop in props])
+            max_size = np.max(bboxes[:,2:] - bboxes[:,:2])
+            dists, indices = neighbors.radius_neighbors(cell_poses, radius=distance_cutoff + max_size)
 
-        cell_poses = np.array([prop.centroid for prop in props])
-        bboxes = np.array([prop.bbox for prop in props])
-        max_size = np.max(bboxes[:,2:] - bboxes[:,:2])
-        dists, indices = neighbors.radius_neighbors(cell_poses, radius=distance_cutoff + max_size)
+            for i, bbox in enumerate(progress(bboxes)):
+                cell = props[i].label
+                x1 = max(0, int(bbox[0]) - distance_cutoff)
+                y1 = max(0, int(bbox[1]) - distance_cutoff)
+                x2 = int(bbox[2]) + distance_cutoff
+                y2 = int(bbox[3]) + distance_cutoff
+                section = cells[x1:x2,y1:y2] == cell
 
-        for i, bbox in enumerate(progress(bboxes)):
-            cell = props[i].label
-            x1 = max(0, int(bbox[0]) - distance_cutoff)
-            y1 = max(0, int(bbox[1]) - distance_cutoff)
-            x2 = int(bbox[2]) + distance_cutoff
-            y2 = int(bbox[3]) + distance_cutoff
-            section = cells[x1:x2,y1:y2] == cell
+                cell_dists = scipy.ndimage.distance_transform_edt(~section)
+                cell_dists[section] = 0
 
-            cell_dists = scipy.ndimage.distance_transform_edt(~section)
-            cell_dists[section] = 0
-
-            for j in indices[i]:
-                x, y = table.reads.positions[j]
-                if x >= x1 and x < x2 and y >= y1 and y < y2:
-                    dist = cell_dists[int(x-x1),int(y-y1)]
-                    cell_matrix.setdefault(j, {})[cell] = dist
+                for j in indices[i]:
+                    x, y = table.reads.positions[j]
+                    if x >= x1 and x < x2 and y >= y1 and y < y2:
+                        dist = cell_dists[int(x-x1),int(y-y1)]
+                        cell_matrix.setdefault(j, {})[cell] = dist
 
     #fig, axis = plt.subplots()
 

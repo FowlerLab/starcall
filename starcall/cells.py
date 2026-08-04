@@ -483,9 +483,12 @@ def make_cell_table(segmentation=None, positions=None, sizes=None, image=None, p
     if segmentation is not None:
         props = skimage.measure.regionprops(segmentation)
         index = np.array([prop.label for prop in props])
-        bboxes = np.array([prop.bbox for prop in props])
-        positions = bboxes[:,:2]
-        sizes = bboxes[:,2:] - bboxes[:,:2]
+        if len(props) == 0: #adding in protection for emtpy segmentation masks
+            positions, sizes = np.zeros((0, 2), int), np.zeros((0, 2), int)
+        else:
+            bboxes = np.array([prop.bbox for prop in props])
+            positions = bboxes[:,:2]
+            sizes = bboxes[:,2:] - bboxes[:,:2]
         
         if properties is not None:
             for name in properties:
@@ -668,6 +671,8 @@ class CellsAccessor:
         return masks
 
     def encode_masks(self, masks, limit=250):
+        if len(self.table.index) == 0:
+            return pandas.Series([], index=self.table.index, dtype=object)
         total_size = sum(masks[i].size for i in self.table.index)
         encoded_size = total_size * 5 / 32
         if encoded_size / len(self.table.index) > limit:
@@ -684,6 +689,11 @@ class CellsAccessor:
         of the base85 encoded strings, to make sure the table doesn't become too large.
         """
         cells = list(self)
+        if len(cells) == 0: #adding in check to end the function early if there are no masks 
+            masks = pandas.Series([], index=self.table.index, dtype=object)
+            self.table['mask' if scale == 1 else 'mask{}'.format(scale)] = pandas.Series([], index=self.table.index, dtype=object)
+            self.rescaled_masks[scale] = masks
+            return masks
         total_size = sum(cell.size.prod() for cell in cells)
         encoded_size = total_size / (scale * scale) * 5 / 32
         if encoded_size / len(cells) > limit:
@@ -703,6 +713,12 @@ class CellsAccessor:
 
         method: The method to calculate overlapping area, passed to Cell.area()
         """
+        if len(self.table.index) == 0 or len(othertable.index) == 0:
+            empty = make_cell_table([])
+            empty.index = pandas.MultiIndex.from_arrays([[],[]])
+            empty['area'] = pandas.Series([], index=empty.index, dtype=float)
+            empty['area_ratio'] = pandas.Series([], index=empty.index, dtype=float)
+            return empty
         largest_cell = max(np.linalg.norm(self.sizes, axis=1).max(), np.linalg.norm(othertable.cells.sizes, axis=1).max())
         neighbors = sklearn.neighbors.NearestNeighbors(n_neighbors=5).fit(othertable.cells.centers)
         distances, indices = neighbors.radius_neighbors(self.centers, radius=largest_cell)

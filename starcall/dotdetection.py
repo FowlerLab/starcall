@@ -99,28 +99,27 @@ def dot_filter_new(image, large_sigma=4, copy=True):
             images.
         copy (bool default True): Whether the input image should be copied or modified in place
     """
+    #modifying it to ignore nan positions in the images
     if copy:
         image = image.copy()
 
     og_shape = image.shape
     if len(image.shape) == 3:
         image = image.reshape((1,) + image.shape)
-
-    #image -= image.mean(axis=(2,3)).reshape(image.shape[0], image.shape[1],1,1)
-    #image /= image.std(axis=(2,3)).reshape(image.shape[0], image.shape[1],1,1)
-    #image -= image.mean(axis=(0,2,3)).reshape(1,-1,1,1)
-    #image /= image.std(axis=(0,2,3)).reshape(1,-1,1,1)
-    #np.clip(image, 0, None, out=image)
+    
+    nan_filter = np.isnan(image).any(axis=(0, 1))
+    #set image nan values to 0 before gaussian blur 
+    #otherwise the blur will expand the NaN section
+    np.nan_to_num(image, copy = False)
     
     for i in range(image.shape[0]):
         for j in range(image.shape[1]):
             image[i,j] -= skimage.filters.gaussian(image[i,j], large_sigma)
-        #for j in range(image.shape[1]):
-            #image[i,j] = scipy.ndimage.gaussian_laplace(image[i,j], large_sigma)
-    #np.clip(image, 0, None, out=image)
 
-    image -= image.mean(axis=(2,3)).reshape(image.shape[0], image.shape[1],1,1)
-    image /= image.std(axis=(2,3)).reshape(image.shape[0], image.shape[1],1,1)
+    #set nan locations to NaN again (the nanfilter is going to be 2d)
+    image[:, :, nan_filter] = np.nan
+    image -= np.nanmean(image, axis = (2,3)).reshape(image.shape[0], image.shape[1],1,1) #image.mean(axis=(2,3)).reshape(image.shape[0], image.shape[1],1,1) # (3) compute z score
+    image /= np.nanstd(image, axis = (2,3)).reshape(image.shape[0], image.shape[1],1,1) #image.std(axis=(2,3)).reshape(image.shape[0], image.shape[1],1,1) # (3) compute z score 
 
     return image.reshape(og_shape)
 
@@ -176,9 +175,11 @@ def highlight_dots(image, gaussian_blur=None):
         image (ndarray of shape (num_cycles, num_channels, width, height)): Input image to filter
         gaussian_blur (float, optional): if specified a gaussian blur is applied before combining
     """
+    #AML - modified to ignore NaN positions in the image when finding dots 
     if len(image.shape) == 3:
         image = image.reshape((1,) + image.shape)
 
+    nan_filter = np.isnan(image[0,0,:,:])
     sorted_image = np.sort(image, axis=1)
     image -= sorted_image[:,-2:-1]
 
@@ -189,9 +190,12 @@ def highlight_dots(image, gaussian_blur=None):
 
     np.clip(image, 0, None, out=image)
 
-    image = image.std(axis=0 if image.shape[0] > 1 else 1)
-    image = image.sum(axis=0)
+    image = np.nanstd(image, axis=0 if image.shape[0] > 1 else 1) # (7) std across cycles per channel #AML- changed std to nanstd, ignore blankspace nans? 
+    image = np.nansum(image, axis=0) # (8) sum across channels to get single grayscale 2d image 
 
+    #for any spot where image was originally nan, we will set it to -1
+    image[nan_filter] = -1
+    
     return image
 
 def detect_dots(image,
@@ -231,39 +235,21 @@ def detect_dots(image,
     if copy: image = image.copy()
 
     filtered = dot_filter_new(image, large_sigma=max_sigma, copy=False)
-    #filtered = dot_filter_old(image, large_sigma=4, copy=False)
-    #filtered = dot_filter(image, major_axis=4, minor_axis=0.5, copy=False)
-    #tifffile.imwrite('tmp_dot_filter_filtered_12.tif', filtered)
+    
     greyimage = highlight_dots(filtered.copy())
     #tifffile.imwrite('tmp_dot_greyimage.tif', greyimage)
-
+    new_threshold = greyimage[greyimage != -1].mean() #note that we set all the nans to -1, to differentiate them for taking a mean 
+    greyimage[greyimage == -1] = 0 
     poses = skimage.feature.blob_log(greyimage,
         min_sigma=min_sigma,
         max_sigma=max_sigma,
         num_sigma=num_sigma,
-        threshold=greyimage.mean(),
+        threshold=new_threshold,
     )
     sigmas = poses[:,2]
-
-    footprint = skimage.morphology.disk(2)
-    for i in range(filtered.shape[0]):
-        for j in range(filtered.shape[1]):
-            filtered[i,j] = skimage.morphology.dilation(filtered[i,j], footprint)
-
     intposes = poses[:,:2].astype(int)
     values = image[:,:,intposes[:,0],intposes[:,1]]
     values = values.transpose(2,0,1)
-
-    #print (values.shape)
-    #print (np.percentile(values, 75, axis=0))
-    #print (np.percentile(values, 99, axis=0))
-    #print (np.mean(values, axis=0))
-    #print (values.min(axis=0), values.max(axis=0))
-    #values /= np.maximum(0.00000001, np.percentile(values, 75, axis=0)[None,:,:])
-    #print (np.percentile(values, 75, axis=0))
-    #print (np.percentile(values, 99, axis=0))
-    #print (np.mean(values, axis=0))
-    #print (values.min(axis=0), values.max(axis=0))
 
     reads = make_readset(positions=poses[:,:2], values=values, channels=channels)
 
