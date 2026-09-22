@@ -5,9 +5,11 @@ import skimage.feature
 import skimage.measure
 import matplotlib.pyplot as plt
 import tifffile
-
+from scipy.ndimage import gaussian_filter, map_coordinates, maximum_filter, minimum_filter
+from scipy.special import softmax
 from . import utils
 from .reads import Read, make_readset
+import numpy as np
 
 def dot_filter(image, major_axis=4, minor_axis=0.5, copy=True):
     """ Filter that removes any background in the sequencing images,
@@ -163,40 +165,6 @@ def dot_filter2_old(image, kernel_size=10):
 
     return image.reshape(og_shape)
 
-def highlight_dots(image, gaussian_blur=None):
-    """ Combine an image containing multiple sequencing cycles into a single
-    grayscale image, containing only the dots from sequencing colonies.
-    To filter for sequencing dots, we subtract the second maximal channel, then
-    take the standard deviation across cycles and sum along channels. This
-    means only features that are bright in a single channel and changing frequently
-    are conserved in the final image.
-
-    Args:
-        image (ndarray of shape (num_cycles, num_channels, width, height)): Input image to filter
-        gaussian_blur (float, optional): if specified a gaussian blur is applied before combining
-    """
-    #AML - modified to ignore NaN positions in the image when finding dots 
-    if len(image.shape) == 3:
-        image = image.reshape((1,) + image.shape)
-
-    nan_filter = np.isnan(image[0,0,:,:])
-    sorted_image = np.sort(image, axis=1)
-    image -= sorted_image[:,-2:-1]
-
-    if gaussian_blur is not None:
-        for i in range(len(image)):
-            for j in range(image.shape[1]):
-                image[i,j] = skimage.filters.gaussian(image[i,j], sigma=gaussian_blur)
-
-    np.clip(image, 0, None, out=image)
-
-    image = np.nanstd(image, axis=0 if image.shape[0] > 1 else 1) # (7) std across cycles per channel #AML- changed std to nanstd, ignore blankspace nans? 
-    image = np.nansum(image, axis=0) # (8) sum across channels to get single grayscale 2d image 
-
-    #for any spot where image was originally nan, we will set it to -1
-    image[nan_filter] = -1
-    
-    return image
 
 def detect_dots(image,
         min_sigma=1,
@@ -247,9 +215,262 @@ def detect_dots(image,
         threshold=new_threshold,
     )
     sigmas = poses[:,2]
+
+    footprint = skimage.morphology.disk(2)
+    for i in range(filtered.shape[0]):
+        for j in range(filtered.shape[1]):
+            filtered[i,j] = skimage.morphology.dilation(filtered[i,j], footprint)
+
     intposes = poses[:,:2].astype(int)
     values = image[:,:,intposes[:,0],intposes[:,1]]
     values = values.transpose(2,0,1)
+
+    reads = make_readset(positions=poses[:,:2], values=values, channels=channels)
+
+    if return_sigmas:
+        return reads, sigmas
+    return reads
+
+
+def highlight_dots(image, gaussian_blur=None):
+    """ Combine an image containing multiple sequencing cycles into a single
+    grayscale image, containing only the dots from sequencing colonies.
+    To filter for sequencing dots, we subtract the second maximal channel, then
+    take the standard deviation across cycles and sum along channels. This
+    means only features that are bright in a single channel and changing frequently
+    are conserved in the final image.
+
+    Args:
+        image (ndarray of shape (num_cycles, num_channels, width, height)): Input image to filter
+        gaussian_blur (float, optional): if specified a gaussian blur is applied before combining
+    """
+    #AML - modified to ignore NaN positions in the image when finding dots 
+    if len(image.shape) == 3:
+        image = image.reshape((1,) + image.shape)
+
+    nan_filter = np.isnan(image[0,0,:,:])
+    sorted_image = np.sort(image, axis=1)
+    image -= sorted_image[:,-2:-1]
+
+    if gaussian_blur is not None:
+        for i in range(len(image)):
+            for j in range(image.shape[1]):
+                image[i,j] = skimage.filters.gaussian(image[i,j], sigma=gaussian_blur)
+
+    np.clip(image, 0, None, out=image)
+
+    image = np.nanstd(image, axis=0 if image.shape[0] > 1 else 1) # (7) std across cycles per channel #AML- changed std to nanstd, ignore blankspace nans? 
+    image = np.nansum(image, axis=0) # (8) sum across channels to get single grayscale 2d image 
+
+    #for any spot where image was originally nan, we will set it to -1
+    image[nan_filter] = -1
+    
+    return image
+
+
+def z_score_dots_per_cycle(image,  copy=True):
+    """ Filter that removes any background in the sequencing images,
+    leaving only the dots from sequencing colonies. Done using a difference
+    of gaussian filter, specified by the parameter large_sigma. Note that the
+    image will contain nans at positions without image data
+
+    Args:
+        image (np.ndarray of shape (num_cycles, num_channels, width, height)
+        large_sigma (float): the gaussian sigma that should be subtracted from the sequencing
+            images.
+        copy (bool default True): Whether the input image should be copied or modified in place
+    """
+    #copy image to prevent the original from being z-scored 
+    image = image.copy()
+    #control image shape
+    og_shape = image.shape
+    if len(image.shape) == 3:
+        image = image.reshape((1,) + image.shape)
+    #z-score
+    image -= np.nanmean(image, axis = (2,3)).reshape(image.shape[0], image.shape[1],1,1) #image.mean(axis=(2,3)).reshape(image.shape[0], image.shape[1],1,1) # (3) compute z score
+    image /= np.nanstd(image, axis = (2,3)).reshape(image.shape[0], image.shape[1],1,1) #image.std(axis=(2,3)).reshape(image.shape[0], image.shape[1],1,1) # (3) compute z score 
+
+    return image.reshape(og_shape)
+
+
+def subtract_dot_background(image, large_sigma=4):
+    """ Filter that removes any background in the sequencing images,
+    leaving only the dots from sequencing colonies. Done using a difference
+    of gaussian filter, specified by the parameter large_sigma. Note that 
+    the nans are set to 0 before the gaussian to prevent them from expanding 
+    and then reset before the corrected image is returned
+
+    Args:
+        image (np.ndarray of shape (num_cycles, num_channels, width, height)
+        large_sigma (float): the gaussian sigma that should be subtracted from the sequencing
+            images.
+    """
+    #modifying it to ignore nan positions in the images
+
+    og_shape = image.shape
+    if len(image.shape) == 3:
+        image = image.reshape((1,) + image.shape)
+    
+    nan_filter = np.isnan(image).any(axis=(0, 1))
+    #set image nan values to 0 before gaussian blur 
+    #otherwise the blur will expand the NaN section
+    np.nan_to_num(image, copy = False)
+    
+    for i in range(image.shape[0]):
+        for j in range(image.shape[1]):
+            image[i,j] -= skimage.filters.gaussian(image[i,j], large_sigma)
+
+    #set nan locations to NaN again (the nanfilter is going to be 2d)
+    image[:, :, nan_filter] = np.nan
+
+    return image.reshape(og_shape)
+
+#using PSF weighted sums around a dot instead of the max 
+#From Claude
+def psf_weighted_values(image, positions, psf_sigma, order=1, truncate=3.0):
+    """PSF-weighted intensity at each dot's sub-pixel position, NaN-aware.
+    For each (cycle, channel) plane, weight pixels by a Gaussian of width
+    `psf_sigma` and sample at the dot's sub-pixel center. Handles NaNs so that
+    they don't contribute weight to the final value
+
+    Args:
+        image (ndarray, (n_cycles, n_channels, H, W)): background-subtracted,
+          May contain NaNs at no-data positions
+        positions (ndarray, (n_dots, >=2)): sub-pixel (row, col) from blob_log.
+        psf_sigma (float): Gaussian weighting width, shared across channels/cycles.
+        order (int): sub-pixel interpolation order (1=bilinear, 3=cubic).
+        truncate (float): kernel radius in units of sigma.
+
+    Returns:
+        values (ndarray, (n_dots, n_cycles, n_channels)): PSF-weighted mean
+            intensity per dot. Positions whose kernel covers no valid pixels
+            come back as NaN.
+    """
+    n_cyc, n_chan = image.shape[:2]
+    coords = positions[:, :2].T  # (2, n_dots): [rows; cols]
+    values = np.empty((positions.shape[0], n_cyc, n_chan), dtype=float)
+
+    # Validity mask is 2-D: a pixel is no-data if any cycle/channel is NaN there,
+    # matching how the detection path defines NaN borders.
+    valid = (~np.isnan(image).any(axis=(0, 1))).astype(float)  # (H, W)
+    den = gaussian_filter(valid, sigma=psf_sigma, mode="constant", cval=0.0, truncate=truncate)
+    safe_den = np.where(den > 1e-6, den, np.nan)  # NaN where no valid support
+
+    for i in range(n_cyc):
+        for j in range(n_chan):
+            plane = np.nan_to_num(image[i, j], nan=0.0)  # local copy, original untouched
+            num = gaussian_filter(plane, sigma=psf_sigma, mode="constant",
+                                  cval=0.0, truncate=truncate)
+            smoothed = num / safe_den  # normalized convolution; NaN outside support
+            values[:, i, j] = map_coordinates(smoothed, coords, order=order,
+                                              mode="nearest", cval=np.nan)
+    return values
+
+def box_max_values(image, positions, box_radius=1):
+    """Max intensity within a (2*box_radius+1)-pixel square box centered at each
+    dot's position, per cycle and channel. NaN-aware: a NaN pixel never wins the
+    max, but if every pixel in a dot's box is NaN, that dot's value is NaN 
+
+    Args:
+        image (ndarray, (n_cycles, n_channels, H, W)): background-subtracted,
+          may contain NaNs at no-data positions.
+        positions (ndarray, (n_dots, >=2)): sub-pixel (row, col) from blob_log.
+        box_radius (int): half-width of the box; box_radius=1 gives a 3x3 box.
+
+    Returns:
+        values (ndarray, (n_dots, n_cycles, n_channels)): max intensity per dot
+            within its box, per cycle and channel.
+    """
+    n_cyc, n_chan = image.shape[:2]
+    H, W = image.shape[2:]
+    size = 2 * box_radius + 1
+    rows = np.clip(np.round(positions[:, 0]).astype(int), 0, H - 1)
+    cols = np.clip(np.round(positions[:, 1]).astype(int), 0, W - 1)
+
+    values = np.empty((positions.shape[0], n_cyc, n_chan), dtype=float)
+    for i in range(n_cyc):
+        for j in range(n_chan):
+            plane = image[i, j]
+            nanmask = np.isnan(plane)
+            filled = np.where(nanmask, -np.inf, plane)
+            box_max = maximum_filter(filled, size=size, mode="constant", cval=-np.inf)
+            no_valid_support = minimum_filter((~nanmask).astype(np.uint8), size=size, mode="constant", cval=0) == 0
+            box_max = np.where(no_valid_support, np.nan, box_max)
+            values[:, i, j] = box_max[rows, cols]
+    return values
+
+
+def detect_dots_keep_background_corrected_intensities(image,extract_mode,
+        min_sigma=1,
+        max_sigma=2,
+        num_sigma=7,
+        return_sigmas=False,
+        channels=None,
+        copy=True):
+    """ Takes a raw sequencing image set and identifies and extracts all sequencing reads
+    from the image, filtering out cell background and debris. This is done by calling
+    dot_filter to filter out any background in the image, then calling highlight_dots
+    to create a single grayscale image, which is then passed to skimage.feature.blob_log.
+    The values at these positions in the background corrected image are extracted, the pixels surrounding
+    these positions are expanded out a distnace sigma and the sum of all intensities in 
+    the expansion is passed to read set creation.
+
+    Args:
+        image (ndarray of shape (n_cycles, n_channels, width, height)): The input image
+        min_sigma, max_sigma, num_sigma (float): Parameters passed to skimage.feature.blob_log
+        return_sigmas (bool, default False): Whether to return the sigma values returned from skimage.feature.blob_log
+        expansion_val (float): value to expand out to sum intensities for reads
+        channels (tuple of str): The names of the sequencing channels in the image.
+            Defaults to ('G', 'T', 'A', 'C'), but if your sequencing channels are in a different
+            order make sure to specify it here.
+        copy (bool default True): Whether the image should be copied or modified in place.
+
+    Returns:
+        reads (DataFrame): The reads detected in the image, each with a position and read values.
+            The columns in the table are:
+                'position_x', 'position_y': the x and y position of the read colony
+                'values_cycle{cycle}_{chan}': the values from the filtered sequencing images,
+                    for each cycle and channel. The names of the channels are specified
+                    in the parameter 'channels'
+        if return_sigmas is specified:
+        sigmas (ndarray of shape (n_dots,)): The estimated sigma of all dots detected in the image
+    """
+    #
+    #if copy: image = image.copy() 
+    image = subtract_dot_background(image, large_sigma=max_sigma)
+    filtered = z_score_dots_per_cycle(image)
+
+    greyimage = highlight_dots(filtered.copy())
+
+    new_threshold = greyimage[greyimage != -1].mean() #note that we set all the nans to -1 in greyimage, to differentiate them for taking a mean 
+    greyimage[greyimage == -1] = 0 #reset to 0 for the acutal blob log search
+    poses = skimage.feature.blob_log(greyimage,
+        min_sigma=min_sigma,
+        max_sigma=max_sigma,
+        num_sigma=num_sigma,
+        threshold=new_threshold,
+    )
+    sigmas = poses[:,2]
+    intposes = poses[:,:2].astype(int)
+
+    #PSF-weighted sum around the dots, w/ one fixed sigma shared across all channels/cycles.
+    if extract_mode == 'psf':
+        psf_sigma = float(np.median(sigmas)) if len(sigmas) else max_sigma
+        print ('using psf weighted values with sigma: ', psf_sigma)
+        values = psf_weighted_values(image, poses[:, :2], psf_sigma=psf_sigma)
+    elif extract_mode == 'box':
+        print('using 3x3 max box values')
+        values = box_max_values(image, poses[:, :2], box_radius=1)
+    else:
+        print ('using default approach....(5x5 max)')
+        #set nans to neg inf for max selection 
+        filtered = np.nan_to_num(image, nan=-np.inf) #don't use the z scored values rn, since we'll be training a color correction method
+        footprint = skimage.morphology.disk(2)
+        for i in range(filtered.shape[0]):
+            for j in range(filtered.shape[1]):
+                filtered[i,j] = skimage.morphology.dilation(filtered[i,j], footprint)
+        values = filtered[:,:,intposes[:,0],intposes[:,1]]
+        values = values.transpose(2,0,1)
 
     reads = make_readset(positions=poses[:,:2], values=values, channels=channels)
 

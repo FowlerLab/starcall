@@ -287,30 +287,6 @@ def make_readset(positions=None, values=None, sequences=None, image=None, channe
     return table
 
 
-def join_contiguous_arrays(arrays):
-    assert all(arr.base is arrays[0].base for arr in arrays)
-    assert all(arr.shape == arrays[0].shape for arr in arrays)
-    assert all(arr.strides == arrays[0].strides for arr in arrays)
-    assert arrays[0].ndim == 1
-
-    pointers = [arr.__array_interface__['data'][0] for arr in arrays]
-    stride = pointers[1] - pointers[0]
-    offset = pointers[0] - arrays[0].base.__array_interface__['data'][0]
-    assert all(end - begin == stride for begin, end in zip(pointers, pointers[1:]))
-
-    #print (offset, stride)
-
-    return np.ndarray(
-        shape = (len(arrays), arrays[0].shape[0]),
-        dtype = arrays[0].dtype,
-        buffer = arrays[0].base,
-        offset = offset,
-        strides = (stride, arrays[0].strides[0])
-    )
-
-
-
-
 @pandas.api.extensions.register_dataframe_accessor("reads")
 class ReadsAccessor:
     """ Accessor object to provide attributes and functions for
@@ -332,10 +308,10 @@ class ReadsAccessor:
             Otherwise, the sequences are generated from the sequencing values, by selecting
             the maximum channel in each cycle to build up a sequence.
 
-    Changes to positions and values will both propagate back to the underlying dataframe, so
-    you can do something like:
-        table.reads.positions *= 2
-        table.reads.values /= np.linalg.norm(table.reads.values, axis=2)[:,:,None]
+    'positions' and 'values' are independent copies of the underlying dataframe's data, so
+    mutating them does not change the table. To update the values stored in the table, use
+    'normalize()', or assign back explicitly, e.g.:
+        table.reads.normalize(method='full')
 
     Full reference documentation is available at <https://fowlerlab.github.io/starcall-docs/starcall.html>
     """
@@ -439,55 +415,22 @@ class ReadsAccessor:
     def __iter__(self):
         return iter(self[i] for i in self.table.index)
 
-    def _consolidate(self):
-        self.table._mgr._consolidate_inplace()
+    def _value_columns(self):
+        return ['values_cycle{:02}_{}'.format(cycle, chan)
+                for cycle in range(self.num_cycles) for chan in self.channels]
 
     @property
     def positions(self):
-        self._consolidate()
-        if 'position_x' in self.table.columns:
-            col1 = self.table.loc[:,'position_x'].to_numpy()
-            col2 = self.table.loc[:,'position_y'].to_numpy()
-
-            full = col1.base
-            offset = col1.__array_interface__['data'][0] - full.__array_interface__['data'][0]
-            stride = col2.__array_interface__['data'][0] - col1.__array_interface__['data'][0]
-
-            arr = np.ndarray((2, col1.shape[0]), col1.dtype, full, offset, (stride, col1.strides[0]))
-            return arr.T
-
-            if full.ndim == 1 or full.shape[0] < 2:
-                raise AttributeError('The columns for a read set must be in a specific order, '
-                        'use starcall.reads.make_readset() to reorder')
-            return full.T
-        return None
+        if not self.has_position:
+            return None
+        return self.table.loc[:, ['position_x', 'position_y']].to_numpy()
 
     @property
     def values(self):
-        self._consolidate()
-        if self.has_values:
-            colname1 = 'values_cycle00_{}'.format(self.channels[0])
-            colname2 = 'values_cycle00_{}'.format(self.channels[1])
-
-            col2 = self.table.loc[:,colname2].to_numpy()
-            col1 = self.table.loc[:,colname1].to_numpy()
-
-            full = col1.base
-            offset = col1.__array_interface__['data'][0] - full.__array_interface__['data'][0]
-            stride = col2.__array_interface__['data'][0] - col1.__array_interface__['data'][0]
-
-            arr = np.ndarray((self.num_cycles * len(self.channels), col1.shape[0]), col1.dtype, full, offset, (stride, col1.strides[0]))
-            arr = arr.T
-            arr.shape = (len(self.table.index), self.num_cycles, len(self.channels))
-            return arr
-
-            if full.ndim == 1 or full.shape[0] < self.num_cycles * len(self.channels):
-                raise AttributeError('The columns for a read set must be in a specific order, '
-                        'use starcall.reads.make_readset() to reorder')
-            full = full.T
-            full.shape = (full.shape[0], -1, len(self.channels))
-            return full
-        return None
+        if not self.has_values:
+            return None
+        arr = self.table.loc[:, self._value_columns()].to_numpy()
+        return arr.reshape(len(self.table.index), self.num_cycles, len(self.channels))
 
     @property
     def sequences(self):
@@ -569,7 +512,8 @@ class ReadsAccessor:
         return aggs
 
     def normalize(self, method='full'):
-        """ Normalizes the values of this read set, based on the method specified
+        """ Normalizes the values of this read set, based on the method specified,
+        and writes the result back into this table's values_cycle* columns.
         Possible methods are:
             'full' (default): values are normalized across the channel axis, so that for each
             cycle the norm of the vector of all channels is 1
@@ -587,6 +531,8 @@ class ReadsAccessor:
         if method == 'sub':
             sorted_values = np.sort(values, axis=2)
             values -= sorted_values[:,:,-2:-1]
+
+        self.table.loc[:, self._value_columns()] = values.reshape(len(self.table.index), -1)
 
     def plot_values(self, path, **kwargs):
         """ Plots the base values for all reads in this table.

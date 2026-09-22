@@ -40,10 +40,8 @@ The accessor provides custom properties listed below:
         Otherwise, the sequences are generated from the sequencing values, by selecting
         the maximum channel in each cycle to build up a sequence.
 
-Changes to positions and values will both propagate back to the underlying dataframe, so
-you can do something like:
-    table.reads.positions *= 2
-    table.reads.values /= np.linalg.norm(table.reads.values, axis=2)[:,:,None]
+Changes to positions and values will not propagate back to the underlying dataframe. To
+update the values stored in the table, use the accessor's normalize() method.
 
 Full reference documentation is available at <https://fowlerlab.github.io/starcall-docs/starcall.html>
 """

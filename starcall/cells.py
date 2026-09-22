@@ -537,7 +537,8 @@ class CellsAccessor:
 
     The attributes on this accessor include:
         
-        # position and bbox attributes: (bboxes, positions, and sizes are all modifiable, changes will propagate to the table)
+        # position and bbox attributes: (bboxes supports assignment, e.g. table.cells.bboxes = new_array,
+        # to write new values back into the table; positions/sizes/centers are read-only derived copies)
         bboxes: array of shape (N, 4), the bounding boxes of all cells, ordered (x1, y1, x2, y2)
         positions: array of shape (N, 2), the centroid position of all cells
         sizes: array of shape (N, 2), the size of the bounding box of all cells
@@ -603,22 +604,13 @@ class CellsAccessor:
     def __iter__(self):
         return iter(self[i] for i in self.table.index)
 
-    def _consolidate(self):
-        self.table._mgr._consolidate_inplace()
-
     @property
     def bboxes(self):
-        self._consolidate()
+        return self.table.loc[:, ['bbox_x1', 'bbox_y1', 'bbox_x2', 'bbox_y2']].to_numpy()
 
-        col1 = self.table.loc[:,'bbox_x1'].to_numpy()
-        col2 = self.table.loc[:,'bbox_y1'].to_numpy()
-
-        full = col1.base
-        offset = col1.__array_interface__['data'][0] - full.__array_interface__['data'][0]
-        stride = col2.__array_interface__['data'][0] - col1.__array_interface__['data'][0]
-
-        arr = np.ndarray((4, col1.shape[0]), col1.dtype, full, offset, (stride, col1.strides[0]))
-        return arr.T
+    @bboxes.setter
+    def bboxes(self, value):
+        self.table.loc[:, ['bbox_x1', 'bbox_y1', 'bbox_x2', 'bbox_y2']] = value
 
     @property
     def positions(self):

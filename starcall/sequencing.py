@@ -2,11 +2,55 @@ import math
 import sys
 import numpy as np
 import sklearn.cluster
+from sklearn.metrics import pairwise_distances
 import skimage.filters
 import dataclasses
 from . import utils
+from . import reads as _reads
 
 import time
+
+# Globals populated per-worker-process by init_barcode_match_worker(), used by
+# match_barcode_batch(). These two functions back the parallel_aligner.smk
+# ProcessPoolExecutor-based alignment step; they must stay at module scope (not
+# nested inside a function/rule) so that they can be pickled and sent to worker
+# processes.
+_worker_barcode_seqs = None
+_worker_barcode_seqs_full = None
+_worker_vecs_bc = None
+
+
+def init_barcode_match_worker(barcode_seqs_u, barcode_seqs_full_u=None):
+    global _worker_barcode_seqs, _worker_barcode_seqs_full, _worker_vecs_bc
+    _worker_barcode_seqs = barcode_seqs_u
+    #labels are built from the untruncated barcodes when available, so matches against
+    #barcodes longer than num_cycles aren't clipped to the matching width
+    _worker_barcode_seqs_full = barcode_seqs_full_u if barcode_seqs_full_u is not None else barcode_seqs_u
+    vecs_bc = _reads.sequences_to_vector(barcode_seqs_u)
+    #a barcode shorter than num_cycles is implicitly null-padded by numpy's fixed-width
+    #unicode dtype; those padded positions match none of G/T/A/C and encode as an all-zero
+    #vector, which would only score a *half*-mismatch (distance 0.5) against a real read
+    #base since just one side of the L1 distance is nonzero. Force them to a uniform 0.25
+    #across every channel instead, which scores an exact full mismatch (distance 1)
+    #regardless of the read's base there, so a too-short barcode can never win or tie
+    #against a genuine full-length match on the strength of its missing positions.
+    unmatched = vecs_bc.sum(axis=-1) == 0
+    vecs_bc[unmatched] = 0.25
+    _worker_vecs_bc = vecs_bc.reshape(len(barcode_seqs_u), -1).astype(np.float32)
+
+
+def match_barcode_batch(args):
+    start, batch = args
+    vecs_reads = _reads.sequences_to_vector(batch).reshape(len(batch), -1).astype(np.float32)
+    D = pairwise_distances(vecs_reads, _worker_vecs_bc, metric='manhattan')  # since they're both encoded as Hamming distance here
+    batch_min = D.min(axis=1).round().astype(int)
+    tie_mask = D <= (batch_min[:, None] + 0.5)  # +0.5 tolerance for float roundoff
+    #_worker_barcode_seqs_full is 2D (one row per barcode identity, one column per '-'-joined
+    #sub-barcode) -- rejoin each matched row into its original hyphenated label before
+    #joining tied matches with ';'
+    matches = [';'.join('-'.join(row) for row in _worker_barcode_seqs_full[np.nonzero(tie_mask[i])[0]]) for i in range(len(batch))]
+    return start, batch_min, matches
+
 
 def euclidean_distance(poses1, poses2):
     poses1, poses2 = np.asarray(poses1), np.asarray(poses2)
