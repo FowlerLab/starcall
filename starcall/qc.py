@@ -240,3 +240,15 @@ def get_zscore_magnitude_df(df) -> np.ndarray:
     """
     X = df.reads.values   # (read, cycle, channel)
     return X.max(axis=2)
+
+def get_fac_delta_of_top_pos(df) -> np.ndarray:
+    """Delta (in absolute value) between the top channel and the second-highest channel
+    per cycle, i.e. how far the winner clears the runner-up (unlike get_top_range below,
+    this ignores the two lowest channels entirely).
+
+    :param df: DataFrame with one read per row.
+    :return: np.ndarray of shape (n_reads, n_cycles).
+    """
+    X = df.reads.values                   # (read, cycle, channel)
+    top2 = np.sort(X, axis=2)[:, :, -2:]   # (read, cycle, 2), ascending -> [second, top]
+    return (np.abs(top2[:, :, 1] - top2[:, :, 0]))/(np.abs(top2[:, :, 1]))
