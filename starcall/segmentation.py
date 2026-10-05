@@ -1,4 +1,5 @@
 import collections
+import contextlib
 import skimage.measure
 import skimage.io
 import numpy as np
@@ -95,14 +96,154 @@ def segment_cyto_cellpose(cyto, dapi, diameter, use_nuclei_channel, gpu=False,
     if logscale:
         cyto = image_log_scale(cyto)
     #allow the model to use just the cytoplasm info vs cytoplasm and nuclei
-    if use_nuclei_channel:
-        img = np.array([dapi, cyto])
-        cells, _, _, _  = model_cyto.eval(img, channels = [2,1], diameter=diameter)
-    else:
-        img = np.array([cyto, dapi])
-        cells, _, _, _  = model_cyto.eval(img, diameter=diameter)
+    with threaded_cellpose_dynamics():
+        if use_nuclei_channel:
+            img = np.array([dapi, cyto])
+            cells, _, _, _  = model_cyto.eval(img, channels = [2,1], diameter=diameter)
+        else:
+            img = np.array([cyto, dapi])
+            cells, _, _, _  = model_cyto.eval(img, diameter=diameter)
 
     return cells
+
+
+""" Multithreaded versions of the slowest CPU steps of cellpose 2.2.2 mask creation, steps2D_interp (following the
+flows, run by follow_flows) and masks_to_flows_cpu (the flow_threshold quality check, which cellpose runs on the CPU
+for images over 1e8 pixels even with a GPU). Both work on independent pixels or masks, and do the same arithmetic in
+the same order as cellpose, so the masks are identical to cellpose's; only the work is split across torch's threads.
+"""
+
+_map_coordinates_nogil = None
+
+def _get_map_coordinates_nogil():
+    """ cellpose.dynamics.map_coordinates, compiled with nogil so threads can run it at the same time """
+    global _map_coordinates_nogil
+    if _map_coordinates_nogil is None:
+        import numba
+
+        @numba.njit(['(int16[:,:,:], float32[:], float32[:], float32[:,:])',
+                '(float32[:,:,:], float32[:], float32[:], float32[:,:])'], nogil=True)
+        def map_coordinates(I, yc, xc, Y):
+            C,Ly,Lx = I.shape
+            yc_floor = yc.astype(np.int32)
+            xc_floor = xc.astype(np.int32)
+            yc = yc - yc_floor
+            xc = xc - xc_floor
+            for i in range(yc_floor.shape[0]):
+                yf = min(Ly-1, max(0, yc_floor[i]))
+                xf = min(Lx-1, max(0, xc_floor[i]))
+                yf1= min(Ly-1, yf+1)
+                xf1= min(Lx-1, xf+1)
+                y = yc[i]
+                x = xc[i]
+                for c in range(C):
+                    Y[c,i] = (np.float32(I[c, yf, xf]) * (1 - y) * (1 - x) +
+                              np.float32(I[c, yf, xf1]) * (1 - y) * x +
+                              np.float32(I[c, yf1, xf]) * y * (1 - x) +
+                              np.float32(I[c, yf1, xf1]) * y * x )
+
+        _map_coordinates_nogil = map_coordinates
+    return _map_coordinates_nogil
+
+def _threaded_steps2D_interp(original, threads):
+    def steps2D_interp(p, dP, niter, use_gpu=False, device=None):
+        if use_gpu:
+            return original(p, dP, niter, use_gpu=use_gpu, device=device)
+
+        import concurrent.futures
+        map_coordinates = _get_map_coordinates_nogil()
+        shape = dP.shape[1:]
+        # cellpose converts dP on every iteration, it only has to be done once
+        dP = dP.astype(np.float32)
+
+        def run_points(start, stop):
+            # each point moves independently, so a contiguous block of them is stepped through all iterations
+            cur_p = p[:, start:stop]
+            dPt = np.zeros(cur_p.shape, np.float32)
+            for t in range(niter):
+                map_coordinates(dP, cur_p[0], cur_p[1], dPt)
+                for k in range(len(cur_p)):
+                    cur_p[k] = np.minimum(shape[k]-1, np.maximum(0, cur_p[k] + dPt[k]))
+
+        bounds = np.linspace(0, p.shape[1], threads + 1).astype(int)
+        with concurrent.futures.ThreadPoolExecutor(threads) as pool:
+            for future in [pool.submit(run_points, start, stop) for start, stop in zip(bounds[:-1], bounds[1:])]:
+                future.result()
+        return p
+
+    return steps2D_interp
+
+def _threaded_masks_to_flows_cpu(threads):
+    import concurrent.futures
+    from scipy.ndimage import find_objects
+    from cellpose import utils as cellpose_utils
+    from cellpose.dynamics import _extend_centers
+
+    def masks_to_flows_cpu(masks, device=None):
+        Ly, Lx = masks.shape
+        mu = np.zeros((2, Ly, Lx), np.float64)
+        mu_c = np.zeros((Ly, Lx), np.float64)
+
+        slices = find_objects(masks)
+        dia = cellpose_utils.diameters(masks)[0]
+        s2 = (.15 * dia)**2
+
+        # the body of the loop over masks in cellpose, each mask only writes its own pixels of mu and mu_c
+        def flows_of_mask(i, si):
+            sr,sc = si
+            ly, lx = sr.stop - sr.start + 1, sc.stop - sc.start + 1
+            y,x = np.nonzero(masks[sr, sc] == (i+1))
+            y = y.astype(np.int32) + 1
+            x = x.astype(np.int32) + 1
+            ymed = np.median(y)
+            xmed = np.median(x)
+            imin = np.argmin((x-xmed)**2 + (y-ymed)**2)
+            xmed = x[imin]
+            ymed = y[imin]
+
+            d2 = (x-xmed)**2 + (y-ymed)**2
+            mu_c[sr.start+y-1, sc.start+x-1] = np.exp(-d2/s2)
+
+            niter = 2*np.int32(np.ptp(x) + np.ptp(y))
+            T = np.zeros((ly+2)*(lx+2), np.float64)
+            T = _extend_centers(T, y, x, ymed, xmed, np.int32(lx), np.int32(niter))
+            T[(y+1)*lx + x+1] = np.log(1.+T[(y+1)*lx + x+1])
+
+            dy = T[(y+1)*lx + x] - T[(y-1)*lx + x]
+            dx = T[y*lx + x+1] - T[y*lx + x-1]
+            mu[:, sr.start+y-1, sc.start+x-1] = np.stack((dy,dx))
+
+        with concurrent.futures.ThreadPoolExecutor(threads) as pool:
+            for future in [pool.submit(flows_of_mask, i, si) for i, si in enumerate(slices) if si is not None]:
+                future.result()
+
+        mu /= (1e-20 + (mu**2).sum(axis=0)**0.5)
+
+        return mu, mu_c
+
+    return masks_to_flows_cpu
+
+@contextlib.contextmanager
+def threaded_cellpose_dynamics(threads=None):
+    """ Replaces cellpose's steps2D_interp and masks_to_flows_cpu with the multithreaded versions above while active.
+    threads defaults to torch's thread count. Only done for cellpose 2.2.2, the version these were copied from.
+    """
+    import importlib.metadata
+    import torch
+    import cellpose.dynamics
+
+    if importlib.metadata.version('cellpose') != '2.2.2':
+        yield
+        return
+
+    threads = threads or torch.get_num_threads()
+    originals = cellpose.dynamics.steps2D_interp, cellpose.dynamics.masks_to_flows_cpu
+    cellpose.dynamics.steps2D_interp = _threaded_steps2D_interp(originals[0], threads)
+    cellpose.dynamics.masks_to_flows_cpu = _threaded_masks_to_flows_cpu(threads)
+    try:
+        yield
+    finally:
+        cellpose.dynamics.steps2D_interp, cellpose.dynamics.masks_to_flows_cpu = originals
  
 def image_log_scale(data, bottom_percentile=10, floor_threshold=50, ignore_zero=True):
     data = data.astype(float)
@@ -167,7 +308,10 @@ def match_segmentations(cells, nuclei):
 
 
 
-def filter_segmentation(masks, remove_edges=True, min_area=100, min_bbox=10, relabel=True):
+FILTER_TABLE_COLUMNS = ['orig_label', 'area', 'bbox_height', 'bbox_width', 'min_bbox_dim', 'max_bbox_dim',
+        'on_edge', 'below_min_area', 'below_min_bbox', 'kept', 'final_label']
+
+def filter_segmentation(masks, remove_edges=True, min_area=100, min_bbox=10, relabel=True, return_table=False):
     """ Filters a segmentation mask based on a set of thresholds typical for
     cell segmentation. 
 
@@ -177,10 +321,20 @@ def filter_segmentation(masks, remove_edges=True, min_area=100, min_bbox=10, rel
     min_bbox: removes any cells that have a height or width less than this value
     relabel: whether to relabel the segmentation mask to be sequential, done
         with skimage segmentation.relabel_sequential
+    return_table: if true, also returns a pandas DataFrame with the area and bbox
+        dimensions of every mask before filtering, with columns FILTER_TABLE_COLUMNS.
+        The return value is then (masks, table)
     """
+
+    if return_table:
+        orig_props = skimage.measure.regionprops(masks)
 
     if remove_edges:
         masks = skimage.segmentation.clear_border(masks)
+        if return_table:
+            # clear_border also removes masks connected to edge masks, so edge
+            # status is taken from the labels that survive it
+            not_edge_labels = set(np.unique(masks))
 
     if min_area or min_bbox:
         props = skimage.measure.regionprops(masks)
@@ -198,6 +352,22 @@ def filter_segmentation(masks, remove_edges=True, min_area=100, min_bbox=10, rel
     if relabel:
         masks, mapping, rmapping = skimage.segmentation.relabel_sequential(masks)
 
-    return masks
+    if not return_table:
+        return masks
+
+    import pandas
+
+    rows = []
+    for prop in orig_props:
+        height, width = prop.bbox[2] - prop.bbox[0], prop.bbox[3] - prop.bbox[1]
+        on_edge = remove_edges and prop.label not in not_edge_labels
+        # labels are only removed or relabeled whole, so any pixel gives the final label
+        final_label = int(masks[tuple(prop.coords[0])])
+        rows.append([prop.label, int(prop.area), height, width, min(height, width), max(height, width),
+                on_edge, bool(min_area) and prop.area < min_area, bool(min_bbox) and min(height, width) < min_bbox,
+                final_label != 0, final_label])
+
+    table = pandas.DataFrame(rows, columns=FILTER_TABLE_COLUMNS)
+    return masks, table
 
 

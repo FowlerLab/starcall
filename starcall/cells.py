@@ -594,7 +594,9 @@ class CellsAccessor:
         if len(self.rescaled_masks):
             kwargs['rescaled_masks'] = {scale: self.rescaled_masks[scale].iloc[i] for scale in self.rescaled_masks}
 
-        cell = Cell(index=index, bbox=self.bboxes[i],
+        # read the bbox per column instead of self.bboxes[i], which copies the whole table
+        bbox = np.array([self.table[name].iat[i] for name in ('bbox_x1', 'bbox_y1', 'bbox_x2', 'bbox_y2')])
+        cell = Cell(index=index, bbox=bbox,
                 attrs=self.table.iloc[i,:], **kwargs)
         return cell
 
@@ -602,7 +604,20 @@ class CellsAccessor:
         return len(self.table.index)
 
     def __iter__(self):
-        return iter(self[i] for i in self.table.index)
+        # same cells as self.at(i), but the table is converted to numpy once instead of once per cell
+        bboxes = self.bboxes
+        rows = self.table.to_numpy()
+        columns = list(self.table.columns)
+        rescaled_masks = {scale: list(masks) for scale, masks in self.rescaled_masks.items()}
+        for i, index in enumerate(self.table.index):
+            kwargs = {}
+            if self.segmentation is not None:
+                kwargs['global_segmentation'] = self.segmentation
+            if self.image is not None:
+                kwargs['global_image'] = self.image
+            if len(rescaled_masks):
+                kwargs['rescaled_masks'] = {scale: masks[i] for scale, masks in rescaled_masks.items()}
+            yield Cell(index=index, bbox=bboxes[i], attrs=dict(zip(columns, rows[i])), **kwargs)
 
     @property
     def bboxes(self):
@@ -669,7 +684,7 @@ class CellsAccessor:
         encoded_size = total_size * 5 / 32
         if encoded_size / len(self.table.index) > limit:
             return None
-        strs = [self[i].encode_mask(masks[i]) for i in self.table.index]
+        strs = [cell.encode_mask(masks[cell.index]) for cell in self]
         column = pandas.Series(strs, index=self.table.index)
         return column
 
@@ -715,13 +730,21 @@ class CellsAccessor:
         neighbors = sklearn.neighbors.NearestNeighbors(n_neighbors=5).fit(othertable.cells.centers)
         distances, indices = neighbors.radius_neighbors(self.centers, radius=largest_cell)
 
-        otherareas = [othertable.cells.at(i).area(method=method) for i in range(len(othertable.index))]
+        # build each Cell once, constructing them is much slower than intersecting them
+        selfcells = list(self)
+        othercells = list(othertable.cells)
+        otherareas = [cell.area(method=method) for cell in othercells]
+
+        selfboxes, otherboxes = self.bboxes, othertable.cells.bboxes
 
         results = []
         for i in range(len(distances)):
-            cellarea = self.at(i).area(method=method)
-            for j in indices[i]:
-                newcell = self.at(i).intersection(othertable.cells.at(j), mask=method!='bbox')
+            cellarea = selfcells[i].area(method=method)
+            # pairs whose bboxes don't overlap have zero area (see Cell.area), skip them before intersecting
+            js = indices[i]
+            sizes = np.minimum(selfboxes[i,2:], otherboxes[js,2:]) - np.maximum(selfboxes[i,:2], otherboxes[js,:2])
+            for j in js[~np.any(sizes <= 0, axis=1)]:
+                newcell = selfcells[i].intersection(othercells[j], mask=method!='bbox')
                 area = newcell.area(method=method)
                 if area > 0:
                     newcell.attrs['area'] = area

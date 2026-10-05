@@ -4,3 +4,6 @@ numpy>=1
 matplotlib
 tifffile
 pandas>=1.4
+# optional, for starcall.dotdetection.detect_dots_gpu (pick the build matching your cuda version)
+# cupy-cuda12x
+# cucim-cu12

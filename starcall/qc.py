@@ -26,22 +26,7 @@ def calculate_peaks(df):
     
     return peak
 
-def calculate_snr(pixels, background_percentile=50, signal_percentile=99.9):
-    """
-    Percentile-based, dot-agnostic SNR for a raw pixel intensity distribution.
 
-    background/signal are given by percentiles of the raw pixel values, and noise
-    is the median absolute deviation scaled to a std-equivalent (1.4826 * MAD),
-    which is robust to the small fraction of bright dot pixels skewing a plain std().
-
-    :param pixels: 1D array of raw pixel intensities for one (well, cycle, channel).
-    :return: (background, signal, noise, snr)
-    """
-    background = np.percentile(pixels, background_percentile)
-    signal = np.percentile(pixels, signal_percentile)
-    noise = 1.4826 * np.median(np.abs(pixels - np.median(pixels)))
-    snr = (signal - background) / noise if noise > 0 else np.nan
-    return background, signal, noise, snr
 
 def get_softmax_df(df, min_error: float = 1e-9, use_min: bool = True) -> np.ndarray:
     """Compute phred quality scores directly from a normalized spot-intensity dataframe.
