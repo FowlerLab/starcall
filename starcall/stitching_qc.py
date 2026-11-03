@@ -438,23 +438,35 @@ def plot_solved_accuracy(composite, constraints, path, cycle_labels=None):
     _save(plt, fig, path)
 
 
-def plot_rotation(cycle_table, tile_table, path, threshold, reference='median', tile_size=2304, phenotype_cycles=()):
+def plot_rotation(cycle_table, tile_table, path, threshold, reference='median', tile_size=2304, phenotype_cycles=(),
+        summary=None):
     """ Rotation of the image content of each cycle, measured on sample tiles before
     alignment (see starcall.rotation): the rotation of each tile relative to the reference,
     what it means in pixels at the tile edge, and the scale of phenotype cycles.
-    cycle_table and tile_table are pandas DataFrames as written by detect_rotation. """
+    cycle_table and tile_table are pandas DataFrames as written by detect_rotation.
+    summary: lines of text describing the correction, shown below the plots """
     plt = _plt()
     cycles = list(cycle_table['cycle'].astype(str))
     names = ['cycle' + c for c in cycles]
     x = np.arange(len(cycles))
     measured = cycle_table.set_index(cycle_table['cycle'].astype(str))
     zero = float(np.nanmedian(measured['measured_deg'] - measured['relative_deg']))
-    rotated = measured['status'] == 'rotated'
+    rotated = measured['status'].astype(str).str.startswith('rotated')
     phenotype = [c for c in cycles if c in set(map(str, phenotype_cycles))]
 
     ncols = 3 if phenotype else 2
-    fig, axes = plt.subplots(1, ncols, figsize=(7 * ncols, 5.5), layout='constrained',
-            width_ratios=[1.4, 1.4, 0.6][:ncols])
+    summary = list(summary or [])
+    if summary:
+        fig = plt.figure(figsize=(7 * ncols, 5.5 + 0.13 * len(summary) + 0.3), layout='constrained')
+        top, bottom = fig.subfigures(2, 1, height_ratios=[5.5, 0.13 * len(summary) + 0.3])
+        axes = top.subplots(1, ncols, width_ratios=[1.4, 1.4, 0.6][:ncols])
+        text_ax = bottom.subplots()
+        text_ax.axis('off')
+        text_ax.text(0, 1, '\n'.join(summary), family='monospace', fontsize=8, va='top', ha='left',
+                transform=text_ax.transAxes)
+    else:
+        fig, axes = plt.subplots(1, ncols, figsize=(7 * ncols, 5.5), layout='constrained',
+                width_ratios=[1.4, 1.4, 0.6][:ncols])
     ax = axes[0]
     ax.axhspan(-threshold, threshold, color='0.9', label='±{} deg threshold (not corrected)'.format(threshold))
     for i, cycle in enumerate(cycles):
@@ -494,17 +506,121 @@ def plot_rotation(cycle_table, tile_table, path, threshold, reference='median', 
     if phenotype:
         ax = axes[2]
         scales = [measured.loc[c, 'scale'] for c in phenotype]
-        ax.bar(range(len(phenotype)), [(s - 1) * 100 for s in scales], color='tab:purple')
+        applied = [measured.loc[c, 'applied_scale'] if 'applied_scale' in measured else 1.0 for c in phenotype]
+        scales_after = [measured.loc[c, 'scale_after'] if 'scale_after' in measured else np.nan for c in phenotype]
+        px = np.arange(len(phenotype))
+        ax.bar(px - 0.2, [(s - 1) * 100 for s in scales], width=0.4, color='tab:purple', label='measured')
+        ax.bar(px + 0.2, [(s - 1) * 100 for s in scales_after], width=0.4, color='tab:green', label='after correction')
         ax.axhspan(-0.5, 0.5, color='0.9', zorder=0, label='±0.5%')
         ax.axhline(0, color='0.5', linewidth=0.5)
-        ax.set_xticks(range(len(phenotype)))
+        ax.set_xticks(px)
         ax.set_xticklabels(['cycle' + c for c in phenotype])
         ax.set_ylabel('scale relative to nominal magnification (%)')
-        ax.set_title('Phenotype scale check\n(not corrected)', fontsize=10)
+        corrected_scale = [c for c, a in zip(phenotype, applied) if np.isfinite(a) and a != 1]
+        ax.set_title('Phenotype scale\n({})'.format('corrected: ' + ', '.join('cycle' + c for c in corrected_scale)
+                if corrected_scale else 'not corrected'), fontsize=10)
         ax.legend(fontsize=7)
 
     corrected = [n for n, r in zip(names, rotated) if r]
     fig.suptitle('Rotation of the image content of each cycle (reference: {}, {:.3f} deg from the first cycle); corrected: {}'.format(
             'median of sequencing cycles' if reference == 'median' else 'cycle' + str(reference), zero,
             ', '.join(corrected) if corrected else 'none'), fontsize=12)
+    _save(plt, fig, path)
+
+
+def rotation_summary(cycle_table, phenotype_cycles, ratio, phenotype_correction='resample', tile_size=None, frame=None):
+    """ Lines of text describing the rotation and scale correction of every cycle, as decided by detect_rotation:
+    what was measured, what is applied and how (resampling the pixels of the tiles, or in coordinates, see
+    starcall.phenotype_frame). frame: the PhenotypeFrame, to describe the transform between the phenotype frame
+    and the sequencing images """
+    lines = []
+    table = cycle_table.set_index(cycle_table['cycle'].astype(str))
+    phenotype_cycles = [str(c) for c in phenotype_cycles]
+    for cycle, row in table.iterrows():
+        is_pt = cycle in phenotype_cycles
+        applied_scale = row['applied_scale'] if 'applied_scale' in row else 1.0
+        if not np.isfinite(row['relative_deg']):
+            lines.append('cycle{}: {}'.format(cycle, row['status']))
+            continue
+        how = 'not corrected'
+        if row['applied_deg'] != 0 or applied_scale != 1:
+            how = ('pixels resampled for alignment only, stitched images keep raw pixels (corrected in coordinates)'
+                    if is_pt and phenotype_correction == 'coordinates' else 'pixels resampled for alignment and stitching')
+        scale_text = ''
+        if is_pt:
+            scale_text = ', scale {:.5f} of nominal ({:.4f} sequencing px per phenotype px, nominal {:.4f})'.format(
+                    row['scale'], row['scale'] / ratio, 1 / ratio)
+        lines.append('cycle{}: measured {:+.4f} deg from reference{} -> applied rotation {:+.4f} deg, scale x{:.5f}: {}'.format(
+                cycle, row['relative_deg'], scale_text, row['applied_deg'], applied_scale, how))
+    if frame is not None:
+        import starcall.phenotype_frame
+        lines.append('')
+        lines.append('Phenotype frame (stitched phenotype images) -> sequencing images:')
+        lines.extend('  ' + line for line in starcall.phenotype_frame.describe(frame, tile_size, translation=False))
+    return lines
+
+
+def plot_phenotype_frame(frame, anchors, refined, sizes, path, summary):
+    """ The phenotype frame of a well (see starcall.phenotype_frame). Left: the tiles of each phenotype cycle in
+    the frame, coloured by how far the refinement against the overlaps between phenotype tiles moved them from
+    the positions given by the joint solve. Right: what the rotation and scale do, as the difference between
+    the transform and the nominal bases_scale / phenotype_scale mapping (aligned at the centre of the tiles), in
+    sequencing px, over the area of the tiles. Below: a text summary of the transform.
+    anchors, refined: dicts of cycle name to unrounded (N, 2) positions in the frame, before and after refinement
+    sizes: dict of cycle name to (N, 2) tile sizes in phenotype px """
+    plt = _plt()
+    import matplotlib.patches
+    cycles = list(anchors)
+    fig = plt.figure(figsize=(15, 6.5 + 0.13 * len(summary) + 0.3), layout='constrained')
+    top, bottom = fig.subfigures(2, 1, height_ratios=[6.5, 0.13 * len(summary) + 0.3])
+    ax, ax2 = top.subplots(1, 2)
+
+    cmap = plt.get_cmap('viridis')
+    moves = {c: np.linalg.norm(np.asarray(refined[c], float) - np.asarray(anchors[c], float), axis=1) for c in cycles}
+    vmax = max([1.0] + [float(m.max()) for m in moves.values() if len(m)])
+    lo, hi = np.full(2, np.inf), np.full(2, -np.inf)
+    for cycle in cycles:
+        r, size = np.asarray(refined[cycle], float), np.asarray(sizes[cycle], float)
+        lo, hi = np.minimum(lo, r.min(axis=0)), np.maximum(hi, (r + size).max(axis=0))
+        for (row, col), (h, w), m in zip(r, size, moves[cycle]):
+            ax.add_patch(matplotlib.patches.Rectangle((col, row), w, h, facecolor=cmap(m / vmax), edgecolor='black',
+                    linewidth=0.3, alpha=0.8))
+    mappable = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(0, vmax))
+    top.colorbar(mappable, ax=ax, label='refinement move (phenotype px)', shrink=0.8)
+    pad = 0.05 * (hi - lo).max()
+    ax.set_xlim(lo[1] - pad, hi[1] + pad)
+    ax.set_ylim(hi[0] + pad, lo[0] - pad)
+    ax.set_aspect('equal')
+    ax.set_xlabel('frame column (phenotype px)')
+    ax.set_ylabel('frame row (phenotype px)')
+    ax.set_title('\n'.join('cycle{}: {} tiles, refinement move median {:.2f} max {:.2f} px'.format(c, len(moves[c]),
+            float(np.median(moves[c])), float(moves[c].max())) for c in cycles), fontsize=9)
+
+    # correction field: transform minus the nominal mapping, both through the centre of the tiles
+    centre = (lo + hi) / 2
+    inset = (hi - lo) / 22
+    rows, cols = np.meshgrid(np.linspace(lo[0] + inset[0], hi[0] - inset[0], 11),
+            np.linspace(lo[1] + inset[1], hi[1] - inset[1], 11), indexing='ij')
+    points = np.stack([rows.ravel(), cols.ravel()], axis=1)
+    diff = (points - centre) @ (frame.matrix - np.eye(2)).T / frame.ratio
+    length = np.linalg.norm(diff, axis=1)
+    quiver = ax2.quiver(points[:, 1], points[:, 0], diff[:, 1], -diff[:, 0], length, cmap='magma', angles='xy')
+    top.colorbar(quiver, ax=ax2, label='correction (sequencing px)', shrink=0.8)
+    for cycle in cycles:
+        for (row, col), (h, w) in zip(np.asarray(refined[cycle], float), np.asarray(sizes[cycle], float)):
+            ax2.add_patch(matplotlib.patches.Rectangle((col, row), w, h, fill=False, edgecolor='0.7', linewidth=0.3))
+    ax2.set_xlim(lo[1] - pad, hi[1] + pad)
+    ax2.set_ylim(hi[0] + pad, lo[0] - pad)
+    ax2.set_aspect('equal')
+    ax2.set_xlabel('frame column (phenotype px)')
+    corners = np.array([lo, (lo[0], hi[1]), (hi[0], lo[1]), hi])
+    corner_shift = float(np.linalg.norm((corners - centre) @ (frame.matrix - np.eye(2)).T / frame.ratio, axis=1).max())
+    ax2.set_title('Rotation {:+.4f} deg and scale x{:.5f}, against the nominal mapping\n'
+            'aligned at the centre of the tiles: up to {:.1f} sequencing px at the corners\n'
+            '(arrows not to scale)'.format(frame.angle, frame.scale, corner_shift), fontsize=9)
+
+    text_ax = bottom.subplots()
+    text_ax.axis('off')
+    text_ax.text(0, 1, '\n'.join(summary), family='monospace', fontsize=8, va='top', ha='left', transform=text_ax.transAxes)
+    fig.suptitle('Phenotype frame: raw phenotype tiles placed by translation, rotation and scale kept as a transform')
     _save(plt, fig, path)

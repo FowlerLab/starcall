@@ -11,6 +11,16 @@ Angles are in degrees, in the convention of rotate_frame (scipy.ndimage.rotate o
 image axes). The angle measured for a cycle is the rotation of its content relative to the
 reference: if mov = rotate_frame(ref, a), measure_tile_rotation(ref, mov) gives a, so a cycle
 measured at angle a is corrected with rotate_frame(frame, -a).
+
+The same fit gives the scale of each cycle's content relative to the reference. For
+phenotype cycles, which are matched after rescaling by the nominal bases_scale / phenotype_scale,
+the measured scale is the error of that nominal ratio. A cycle measured at scale s (the fit maps
+its content onto the reference with a factor s, so its content is s times too small) is corrected
+with rotate_frame(frame, angle, scale=s).
+
+rotate_frame(frame, angle, scale=s) moves the content at frame pixel u (row, col) to
+c + content_matrix(angle, s) @ (u - c), c the frame centre. Phenotype cycles can also be corrected
+in coordinates instead of pixels, see starcall.phenotype_frame.
 """
 import numpy as np
 
@@ -22,15 +32,38 @@ MIN_PATCHES = 4
 MIN_TILES = 4
 
 
-def rotate_frame(frame, angle, order=1):
-    """ Rotates a tile (H, W) or (C, H, W) by angle degrees about its centre, keeping its
-    shape. The pixels uncovered at the corners are filled with the nearest edge values. """
-    if angle == 0:
-        return frame
+def content_matrix(angle, scale=1):
+    """ The 2x2 matrix, in (row, col), by which rotate_frame(frame, angle, scale=scale) moves the
+    content of a frame about its centre """
+    a = np.radians(angle)
+    return scale * np.array([[np.cos(a), -np.sin(a)], [np.sin(a), np.cos(a)]])
+
+
+def rotate_frame(frame, angle, order=1, scale=1):
+    """ Rotates a tile (H, W) or (C, H, W) by angle degrees about its centre, and enlarges its
+    content by scale about the centre, keeping its shape. The pixels uncovered at the corners
+    (or edges, for scale < 1) are filled with the nearest edge values. """
+    if scale == 1:
+        if angle == 0:
+            return frame
+        import scipy.ndimage
+        frame = np.asarray(frame)
+        return scipy.ndimage.rotate(frame, angle, axes=(frame.ndim - 1, frame.ndim - 2), reshape=False,
+                order=order, mode='nearest')
+
     import scipy.ndimage
+    import scipy.special
     frame = np.asarray(frame)
-    return scipy.ndimage.rotate(frame, angle, axes=(frame.ndim - 1, frame.ndim - 2), reshape=False,
-            order=order, mode='nearest')
+    # the transform scipy.ndimage.rotate uses, with the output pixel mapped back through the scale
+    c, s = scipy.special.cosdg(angle), scipy.special.sindg(angle)
+    matrix = np.array([[c, s], [-s, c]]) / scale
+    center = (np.array(frame.shape[-2:]) - 1) / 2
+    offset = center - matrix @ center
+    planes = frame.reshape(-1, *frame.shape[-2:])
+    out = np.empty(planes.shape, frame.dtype)
+    for k in range(len(planes)):
+        scipy.ndimage.affine_transform(planes[k], matrix, offset, output=out[k], order=order, mode='nearest')
+    return out.reshape(frame.shape)
 
 
 def _peak(result):
@@ -70,6 +103,14 @@ def measure_tile_rotation(ref, mov, mov_scale=1):
     mov = np.asarray(mov, dtype=np.float32)
     if mov_scale != 1:
         mov = skimage.transform.rescale(mov, mov_scale, anti_aliasing=True, preserve_range=True).astype(np.float32)
+
+    # mov covers more area than ref (eg a phenotype tile imaged at a lower magnification than
+    # the base images): measure ref in mov instead and invert the result
+    if np.any(np.array(mov.shape) > np.array(ref.shape)):
+        result = measure_tile_rotation(mov, ref)
+        if result is not None:
+            result.update(angle=-result['angle'], scale=1 / result['scale'], offset=-result['offset'])
+        return result
 
     # coarse offset of mov in ref, matching the center half of mov at a lower resolution
     ref_small = skimage.transform.downscale_local_mean(ref, COARSE_FACTOR)
@@ -143,13 +184,16 @@ class FrameReader:
             self.file.close()
 
 
-def sample_tiles(composite, layer, num_tiles):
+def sample_tiles(composite, layer, num_tiles, indices=None, fraction=0.7):
     """ Indices of about num_tiles tiles of a layer of the composite, spread over the central
-    70% of the well so that they are away from the mostly empty tiles at the edge """
-    indices = np.flatnonzero(composite.boxes.positions[:,2] == layer)
+    fraction of the well (70% by default) so that they are away from the mostly empty tiles at the edge.
+    indices limits the tiles to choose from, eg to the tiles inside a phenotype tile """
+    if indices is None:
+        indices = np.flatnonzero(composite.boxes.positions[:,2] == layer)
+    indices = np.asarray(indices)
     centers = composite.boxes.centers[indices,:2]
     lo, hi = centers.min(axis=0), centers.max(axis=0)
-    mid, half = (lo + hi) / 2, (hi - lo) / 2 * 0.7
+    mid, half = (lo + hi) / 2, (hi - lo) / 2 * fraction
     side = int(np.ceil(np.sqrt(num_tiles)))
     grid = np.linspace(-1, 1, side)
     chosen = []
@@ -170,8 +214,21 @@ def _nearest_tile(composite, layer, center):
     return int(indices[np.argmin(np.linalg.norm(centers - center, axis=1))])
 
 
+def tiles_inside(composite, layer, box_index, min_overlap):
+    """ Indices of the tiles of a layer with at least min_overlap of their area inside the box at box_index """
+    indices = np.flatnonzero(composite.boxes.positions[:,2] == layer)
+    points1 = composite.boxes.positions[indices,:2]
+    points2 = points1 + composite.boxes.sizes[indices,:2]
+    box1 = composite.boxes.positions[box_index,:2]
+    box2 = box1 + composite.boxes.sizes[box_index,:2]
+    inside = np.prod(np.clip(np.minimum(points2, box2) - np.maximum(points1, box1), 0, None), axis=1)
+    fraction = inside / np.prod(composite.boxes.sizes[indices,:2], axis=1)
+    return [int(i) for i in indices[fraction >= min_overlap]]
+
+
 def detect_rotations(readers, cycle_names, is_phenotype, composite, phenotype_scale_factor,
-        reference='median', threshold=0.05, correct=True, num_tiles=16, order=1, executor=None):
+        reference='median', threshold=0.05, correct=True, num_tiles=16, order=1, executor=None,
+        min_phenotype_overlap=0.5, correct_scale=False, scale_threshold=0.0005):
     """ Measures the rotation of every cycle and decides the correction applied to each.
 
     readers: one FrameReader (or callable tile index -> 2d image of the alignment channel)
@@ -184,37 +241,59 @@ def detect_rotations(readers, cycle_names, is_phenotype, composite, phenotype_sc
         name of a cycle
     threshold: cycles whose rotation from the reference is smaller than this (degrees) are
         not corrected
+    num_tiles: number of tiles the rotation of each cycle is measured on, sampled on a grid
+        over the center of the well
+    min_phenotype_overlap: a phenotype cycle imaged as a single tile is instead measured on the
+        tiles of the first sequencing cycle with at least this fraction of their area inside it,
+        all of them if there are num_tiles or fewer, or num_tiles of them sampled on a grid over them
+    correct_scale: also rescale phenotype cycles whose scale differs from 1 by more than
+        scale_threshold, see the module docstring
 
     All cycles are measured against the first sequencing cycle. Returns (cycle_table,
-    tile_table) as lists of dicts, see detect_rotation in alignment.smk for the columns.
+    tile_table, zero) where the tables are lists of dicts, see detect_rotation in alignment.smk
+    for the columns, and zero is the reference rotation.
     """
     import concurrent.futures
     executor = executor or concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    layer_indices = [np.flatnonzero(composite.boxes.positions[:,2] == layer) for layer in range(len(cycle_names))]
     measure_index = [i for i, pt in enumerate(is_phenotype) if not pt][0] #by default chooses the first
-    sample = sample_tiles(composite, measure_index, num_tiles)
-    ref_start = np.flatnonzero(composite.boxes.positions[:,2] == measure_index)[0]
-    ref_frames = {tile: readers[measure_index](tile - ref_start) for tile in sample}
+    grid_sample = sample_tiles(composite, measure_index, num_tiles)
+    ref_start = layer_indices[measure_index][0]
 
-    def moving_tiles(cycle):
+    def sample_pairs(cycle):
+        """ The (reference tile, tile of the cycle) pairs the rotation of a cycle is measured on """
+        indices = layer_indices[cycle]
+        if is_phenotype[cycle] and len(indices) == 1:
+            # a single phenotype tile covers only part of the well, so the grid over the well
+            # would mostly sample tiles outside of it
+            inside = tiles_inside(composite, measure_index, indices[0], min_phenotype_overlap)
+            if len(inside) > num_tiles:
+                inside = sample_tiles(composite, measure_index, num_tiles, indices=inside, fraction=1)
+            return [(tile, int(indices[0])) for tile in inside]
         if is_phenotype[cycle]:
-            return [_nearest_tile(composite, cycle, composite.boxes.centers[tile,:2]) for tile in sample]
+            return [(tile, _nearest_tile(composite, cycle, composite.boxes.centers[tile,:2])) for tile in grid_sample]
         # sequencing cycles have the same tiles, in the same order
-        layer_start = np.flatnonzero(composite.boxes.positions[:,2] == cycle)[0]
-        return [int(tile - ref_start + layer_start) for tile in sample]
+        return [(tile, int(tile - ref_start + indices[0])) for tile in grid_sample]
 
-    def measure(cycle, frames, angle=0):
+    pairs_by_cycle = [sample_pairs(cycle) for cycle in range(len(cycle_names))]
+    ref_tiles = sorted(set(ref_tile for pairs in pairs_by_cycle for ref_tile, tile in pairs))
+    ref_frames = {tile: readers[measure_index](tile - ref_start) for tile in ref_tiles}
+
+    def measure(cycle, frames, angle=0, applied_scale=1):
         scale = phenotype_scale_factor if is_phenotype[cycle] else 1
-        jobs = [executor.submit(measure_tile_rotation, ref_frames[tile], rotate_frame(frame, angle, order), scale)
-                for tile, frame in zip(sample, frames)]
+        # each tile is rotated once, a single phenotype tile is shared by all pairs of its cycle
+        rotated = {tile: rotate_frame(frame, angle, order, applied_scale) for tile, frame in frames.items()}
+        jobs = [executor.submit(measure_tile_rotation, ref_frames[ref_tile], rotated[tile], scale)
+                for ref_tile, tile in pairs_by_cycle[cycle]]
         return [job.result() for job in jobs]
 
     tile_table, measured, frames_by_cycle = [], {}, {}
     for cycle, name in enumerate(cycle_names):
-        tiles = moving_tiles(cycle)
-        frames = [readers[cycle](tile - np.flatnonzero(composite.boxes.positions[:,2] == cycle)[0]) for tile in tiles]
+        pairs = pairs_by_cycle[cycle]
+        frames = {tile: readers[cycle](tile - layer_indices[cycle][0]) for ref_tile, tile in pairs}
         frames_by_cycle[cycle] = frames
         results = measure(cycle, frames)
-        for ref_tile, tile, result in zip(sample, tiles, results):
+        for (ref_tile, tile), result in zip(pairs, results):
             row = dict(cycle=name, tile=tile, reference_tile=ref_tile, angle_deg=np.nan, scale=np.nan, rms_px=np.nan, n_patches=0)
             if result is not None:
                 row.update(angle_deg=result['angle'], scale=result['scale'], rms_px=result['rms_px'], n_patches=result['n_patches'])
@@ -233,24 +312,40 @@ def detect_rotations(readers, cycle_names, is_phenotype, composite, phenotype_sc
         angles = measured[cycle]
         rows = [row for row in tile_table if row['cycle'] == name and np.isfinite(row['angle_deg'])]
         row = dict(cycle=name, measured_deg=np.nan, relative_deg=np.nan, applied_deg=0.0, residual_after_deg=np.nan,
-                n_tiles=len(angles), spread_deg=np.nan, scale=np.nan, fit_rms_px=np.nan, status='')
+                n_tiles=len(angles), spread_deg=np.nan, scale=np.nan, fit_rms_px=np.nan, status='',
+                applied_scale=1.0, scale_after=np.nan, scale_spread=np.nan)
         if len(angles) < MIN_TILES:
             row['status'] = 'failed: only {} tiles could be measured'.format(len(angles))
             cycle_table.append(row)
             continue
         measured_deg = float(np.median(angles))
         relative = measured_deg - zero
+        scales = [r['scale'] for r in rows]
         row.update(measured_deg=measured_deg, relative_deg=relative,
                 spread_deg=float(np.percentile(angles, 75) - np.percentile(angles, 25)),
-                scale=float(np.median([r['scale'] for r in rows])), fit_rms_px=float(np.median([r['rms_px'] for r in rows])))
+                scale=float(np.median(scales)), fit_rms_px=float(np.median([r['rms_px'] for r in rows])),
+                scale_spread=float(np.percentile(scales, 75) - np.percentile(scales, 25)))
+        applied_scale = 1.0
+        if correct and correct_scale and is_phenotype[cycle] and abs(row['scale'] - 1) >= scale_threshold:
+            applied_scale = row['scale']
+        rotate = correct and abs(relative) >= threshold
+        applied = -relative if rotate else 0.0
+
         if abs(relative) < threshold:
             row.update(status='below threshold', residual_after_deg=relative)
         elif not correct:
             row.update(status='not corrected (correct: False)', residual_after_deg=relative)
         else:
-            applied = -relative
-            after = [r['angle'] for r in measure(cycle, frames_by_cycle[cycle], applied) if r is not None]
-            row.update(applied_deg=applied, status='rotated',
-                    residual_after_deg=float(np.median(after)) - zero if len(after) else np.nan)
+            row.update(status='rotated')
+        if applied_scale != 1:
+            row['status'] += ', rescaled'
+
+        if rotate or applied_scale != 1:
+            after = [r for r in measure(cycle, frames_by_cycle[cycle], applied, applied_scale) if r is not None]
+            row.update(applied_deg=applied, applied_scale=applied_scale,
+                    residual_after_deg=float(np.median([r['angle'] for r in after])) - zero if len(after) else np.nan,
+                    scale_after=float(np.median([r['scale'] for r in after])) if len(after) else np.nan)
+        else:
+            row['scale_after'] = row['scale']
         cycle_table.append(row)
     return cycle_table, tile_table, zero
