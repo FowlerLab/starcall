@@ -272,7 +272,7 @@ def make_readset(positions=None, values=None, sequences=None, image=None, channe
                 colname = 'values_cycle{:02}_{}'.format(cycle, channels[chan])
                 columns.append(colname)
 
-        table = pandas.DataFrame(values.reshape(values.shape[0], -1), columns=columns)
+        table = pandas.DataFrame(values.reshape(values.shape[0], len(columns)), columns=columns)
         tables.append(table)
 
     if sequences is not None:

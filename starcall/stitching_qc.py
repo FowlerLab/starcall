@@ -30,14 +30,22 @@ def _save(plt, fig, path):
 
 
 def _labels(composite, cycle_labels):
-    layers = sorted(set(int(z) for z in composite.boxes.positions[:,2]))
+    layers = sorted(set(int(z) for z in _layers(composite)))
     if cycle_labels is None or len(cycle_labels) < len(layers):
         return {layer: 'z={}'.format(layer) for layer in layers}
     return {layer: str(cycle_labels[layer]) for layer in layers}
 
 
 def _layers(composite):
-    return composite.boxes.positions[:,2].astype(int)
+    """ z of each tile, 0 for all tiles of a composite with 2-D positions """
+    positions = composite.boxes.positions
+    if positions.shape[1] < 3:
+        return np.zeros(len(positions), dtype=int)
+    return positions[:,2].astype(int)
+
+
+def _z(box):
+    return int(box.position[2]) if len(box.position) > 2 else 0
 
 
 def _key(const):
@@ -132,7 +140,7 @@ def _grid(num):
 def _pair_title(composite, consts, cycle_labels):
     labels = _labels(composite, cycle_labels)
     for c in consts:
-        z1, z2 = int(c.box1.position[2]), int(c.box2.position[2])
+        z1, z2 = _z(c.box1), _z(c.box2)
         return labels[z1] if z1 == z2 else '{} → {}'.format(labels[z1], labels[z2])
     return ''
 
@@ -215,7 +223,7 @@ def plot_pair_constraints(composite, overlapping, calculated, background, path, 
 
     fig, (ax_map, ax_hist, ax_diff) = plt.subplots(1, 3, figsize=(19, 6), width_ratios=[1.2, 1, 1.1], layout='constrained')
     if calculated:
-        _tile_outlines(ax_map, composite, np.flatnonzero(_layers(composite) == int(calculated[0].box1.position[2])))
+        _tile_outlines(ax_map, composite, np.flatnonzero(_layers(composite) == _z(calculated[0].box1)))
         mid = _midpoints(calculated)
         points = ax_map.scatter(mid[:,1], mid[:,0], c=scores, cmap='viridis', vmin=0, vmax=1, s=_marker_size(len(overlapping)))
         fig.colorbar(points, ax=ax_map, label=SCORE_LABEL, extend='min', shrink=0.8)
@@ -261,7 +269,7 @@ def plot_filtered_constraints(composite, calculated, background, threshold, abov
 
     fig, (ax_map, ax_hist, ax_diff) = plt.subplots(1, 3, figsize=(19, 6), width_ratios=[1.2, 1, 1.1], layout='constrained')
     if calculated:
-        _tile_outlines(ax_map, composite, np.flatnonzero(_layers(composite) == int(calculated[0].box1.position[2])))
+        _tile_outlines(ax_map, composite, np.flatnonzero(_layers(composite) == _z(calculated[0].box1)))
     for ax, xy, s in ((ax_map, mid, size), (ax_diff, diffs, 8)):
         points = ax.scatter(xy[kept,1], xy[kept,0], c=scores[kept], cmap='viridis', vmin=0, vmax=1, s=s,
                 label='kept (n={})'.format(kept.sum()))
@@ -290,7 +298,7 @@ def _pair_matrix(composite, consts, value_func, reduce=np.median):
     layer_index = {layer: i for i, layer in enumerate(_labels(composite, None))}
     groups = {}
     for c in consts:
-        key = tuple(sorted((layer_index[int(c.box1.position[2])], layer_index[int(c.box2.position[2])])))
+        key = tuple(sorted((layer_index[_z(c.box1)], layer_index[_z(c.box2)])))
         value = value_func(c)
         if value is not None and np.isfinite(value):
             groups.setdefault(key, []).append(value)
